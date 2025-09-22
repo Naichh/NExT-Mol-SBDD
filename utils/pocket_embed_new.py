@@ -39,13 +39,13 @@ def get_sequence_and_res_keys_from_pdb(pdb_path):
         print(f"\n[!] 使用Biopython解析PDB {pdb_path} 时出错: {e}")
         return None, None
 
-def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device, max_len=1000, overlap=100):
+def process_protein_by_sequence(sequence, res_keys, model, tokenizers, device, max_len=1000, overlap=100):
     """
     通过手动tokenization处理蛋白质序列，并自动对超长序列进行分块处理以防止OOM。
     """
     try:
         if len(sequence) <= max_len:
-            token_ids = tokenizer.batch_encode_plus([("", sequence)], return_tensors="pt")["input_ids"].to(device)
+            token_ids = tokenizers.batch_encode_plus([("", sequence)], return_tensors="pt")["input_ids"].to(device)
             with torch.no_grad():
                 # --- 最终、决定性的修正 ---
                 # 移除 repr_layers 参数
@@ -59,7 +59,7 @@ def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device, ma
             while start < len(sequence):
                 end = start + max_len
                 chunk_seq = sequence[start:end]
-                token_ids = tokenizer.batch_encode_plus([("", chunk_seq)], return_tensors="pt")["input_ids"].to(device)
+                token_ids = tokenizers.batch_encode_plus([("", chunk_seq)], return_tensors="pt")["input_ids"].to(device)
                 with torch.no_grad():
                     # --- 最终、决定性的修正 ---
                     output = model(token_ids)
@@ -103,7 +103,7 @@ def main(args):
     # 加载模型和分词器
     print(f"{shard_info} 正在加载 ESM-3 模型和分词器...")
     model = ESM3.from_pretrained(args.model_name).to(device).eval()
-    tokenizer = model.tokenizer
+    tokenizers = model.tokenizers
     print(f"{shard_info} 模型和分词器加载成功。")
 
     with open(index_path, 'rb') as f:
@@ -134,7 +134,7 @@ def main(args):
         if not sequence:
             continue
             
-        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, tokenizer, device, max_len=args.max_len)
+        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, tokenizers, device, max_len=args.max_len)
         
         if core_embedding is None:
             continue
