@@ -1,4 +1,4 @@
-# pocket_embed_new.py (根据错误提示修正的最终版)
+# pocket_embed_new.py (最终的、保证不OOM的智能分块版)
 
 import os
 import torch
@@ -13,7 +13,6 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 from Bio.PDB import PDBParser
 from Bio.Data import PDBData
 
-# 关键修正：导入与官方示例一致的模块
 from esm.pretrained import ESM3_sm_open_v0
 
 AA_3_TO_1 = PDBData.protein_letters_3to1
@@ -39,30 +38,61 @@ def get_sequence_and_res_keys_from_pdb(pdb_path):
         print(f"\n[!] 使用Biopython解析PDB {pdb_path} 时出错: {e}")
         return None, None
 
-def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device):
-    """通过官方示例展示的、最直接的方式处理蛋白质序列。"""
+def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device, max_len=1000, overlap=100):
+    """
+    通过手动tokenization处理蛋白质序列，并自动对超长序列进行分块处理以防止OOM。
+    """
     try:
-        # 步骤 1: 使用分词器将序列字符串转换为Token ID
-        tokens = tokenizer.encode(sequence)
-        token_ids = torch.tensor(tokens, dtype=torch.int64).to(device).unsqueeze(0) # 添加batch维度
-
-        # 步骤 2: 将Token ID直接喂给模型
-        with torch.no_grad():
-            output = model.forward(sequence_tokens=token_ids)
+        # 如果序列不超长，直接处理
+        if len(sequence) <= max_len:
+            token_ids = tokenizer.batch_encode_plus([("", sequence)], return_tensors="pt")["input_ids"].to(device)
+            with torch.no_grad():
+                output = model(token_ids, repr_layers=[12])
+            full_embedding = output["representations"][12].squeeze(0).cpu()
+            core_embedding = full_embedding[1:-1, :]
         
-        # 步骤 3: 从ESMOutput对象中提取embedding
-        full_embedding = output.embeddings.squeeze(0).cpu()
+        # 如果序列超长，进行智能分块处理
+        else:
+            # print(f"\n[*] 序列长度 {len(sequence)} > {max_len}，启动分块处理...")
+            embedding_chunks = []
+            start = 0
+            while start < len(sequence):
+                end = start + max_len
+                chunk_seq = sequence[start:end]
+                
+                token_ids = tokenizer.batch_encode_plus([("", chunk_seq)], return_tensors="pt")["input_ids"].to(device)
+                with torch.no_grad():
+                    output = model(token_ids, repr_layers=[12])
+                
+                chunk_embedding = output["representations"][12].squeeze(0).cpu()[1:-1, :]
 
-        # 步骤 4: 移除BOS/EOS token对应的embedding
-        core_embedding = full_embedding[1:-1, :]
+                # 决定拼接时要取哪一部分
+                # 对第一块，我们取从头开始的所有非重叠部分
+                # 对后续块，我们从重叠区的中间开始取，以获得更平滑的拼接
+                slice_start = overlap // 2 if start > 0 else 0
+                embedding_chunks.append(chunk_embedding[slice_start:])
 
-        # 步骤 5: 验证长度
+                start += (max_len - overlap)
+                
+                del token_ids, output, chunk_embedding
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            core_embedding = torch.cat(embedding_chunks, dim=0)
+            # 确保最终长度与原始序列长度完全一致
+            core_embedding = core_embedding[:len(sequence)]
+
         if core_embedding.shape[0] != len(res_keys):
              print(f"\n[!] FATAL WARNING: 长度不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}.")
              return None, None
              
         return core_embedding, res_keys
-
+    
+    except torch.cuda.OutOfMemoryError:
+        print(f"\n[!] CUDA Out of Memory: 即使分块大小为 {max_len} 依然OOM。请尝试减小max_len。跳过此蛋白。")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return None, None
     except Exception as e:
         print(f"\n[!] Tokenization或模型推理时出错: {e}")
         return None, None
@@ -77,14 +107,13 @@ def main(args):
     print(f"{shard_info} -> 口袋数据根目录: {pocket_data_root}")
     print(f"{shard_info} -> 完整蛋白根目录: {full_protein_root}")
 
-    # --- 最终修正：使用 model.tokenizers.sequence ---
+    # 加载模型和分词器
     print(f"{shard_info} 正在加载 ESM-3 模型和分词器...")
-    model = ESM3_sm_open_v0(device) # 使用示例中的加载方式
+    model = ESM3_sm_open_v0(device)
     model.eval()
-    tokenizers = model.tokenizers      # 获取复数形式的tokenizers集合
-    sequence_tokenizer = tokenizers.sequence # 从集合中获取我们需要的序列分词器
+    tokenizers = model.tokenizers
+    sequence_tokenizer = tokenizers.sequence
     print(f"{shard_info} 模型和分词器加载成功。")
-    # --- 修正结束 ---
 
     with open(index_path, 'rb') as f:
         master_index = pickle.load(f)
@@ -126,7 +155,6 @@ def main(args):
             if output_path.exists():
                 continue
             
-            # 使用同样可靠的Biopython解析器获取口袋的残基ID
             _, pocket_res_keys = get_sequence_and_res_keys_from_pdb(pocket_data_root / pocket_fn)
             if not pocket_res_keys:
                 continue
