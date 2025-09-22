@@ -1,8 +1,7 @@
-# pocket_embed_new.py (采纳您的建议，最终简洁稳健版)
+# pocket_embed_new.py (最终、最可靠的序列优先版)
 
 import os
 import torch
-import io
 import argparse
 import pickle
 from pathlib import Path
@@ -11,68 +10,75 @@ import warnings
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
+from Bio.PDB import PDBParser
+from Bio.Data import PDBData
+
 from esm.models.esm3 import ESM3
 from esm.sdk.api import ESMProtein, LogitsConfig
 
-def get_residue_ids_from_pdb(pdb_path):
-    """
-    从PDB文件中按顺序解析并返回一个唯一的(链ID, 残基序号)元组列表。
-    这个简单、可靠的解析器是我们的“唯一真理”。
-    """
-    try:
-        with open(pdb_path, 'r', errors='ignore') as f:
-            lines = f.readlines()
-        
-        residue_keys = []
-        seen_keys = set()
-        for line in lines:
-            if line.startswith("ATOM"):
-                chain_id = line[21].strip()
-                res_id = int(line[22:26].strip())
-                key = (chain_id, res_id)
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    residue_keys.append(key)
-        return residue_keys
-    except Exception as e:
-        print(f"\n[!] 解析PDB文件 {pdb_path} 时出错: {e}")
-        return None
+# Biopython使用三字母氨基酸码，我们需要一个转换字典
+AA_3_TO_1 = PDBData.protein_letters_3to1
 
-def process_full_protein(protein_pdb_path, model, device):
+def get_sequence_and_res_keys_from_pdb(pdb_path):
     """
-    处理一个完整的蛋白质PDB文件，返回切片后的核心embedding和从PDB直接解析的残基ID列表。
+    使用Biopython从PDB文件中按顺序解析出标准的氨基酸序列和对应的(链ID, 残基序号)列表。
+    这是最可靠的获取序列和映射关系的方法。
     """
     try:
-        # 步骤 1: 我们自己从PDB文件解析出物理残基ID列表
-        full_protein_res_keys = get_residue_ids_from_pdb(protein_pdb_path)
-        if not full_protein_res_keys:
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("protein", pdb_path)
+        
+        sequence = ""
+        residue_keys = []
+        
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    res_name = residue.get_resname()
+                    if res_name in AA_3_TO_1:
+                        sequence += AA_3_TO_1[res_name]
+                        res_id = residue.get_id()[1]
+                        chain_id = chain.get_id()
+                        residue_keys.append((chain_id, res_id))
+        return sequence, residue_keys
+    except Exception as e:
+        print(f"\n[!] 使用Biopython解析PDB {pdb_path} 时出错: {e}")
+        return None, None
+
+def process_protein_by_sequence(protein_pdb_path, model, device):
+    """
+    通过先提取序列，再输入模型的方式处理蛋白质，返回核心embedding和残基ID列表。
+    """
+    try:
+        # 步骤 1: 使用Biopython获取纯净的序列和可靠的残基映射
+        sequence, res_keys = get_sequence_and_res_keys_from_pdb(protein_pdb_path)
+        if not sequence:
+            print(f"\n[!] 无法从 {protein_pdb_path} 提取有效序列。")
             return None, None
 
-        # 步骤 2: 使用ESM SDK加载PDB并生成完整的embedding
-        protein = ESMProtein.from_pdb(protein_pdb_path)
-        protein_tensor = model.encode(protein).to(device)
+        # 步骤 2: 将序列字符串喂给模型
+        # 注意：ESMProtein.from_sequence() 是创建对象的方法
+        protein_obj = ESMProtein.from_sequence(sequence)
+        protein_tensor = model.encode(protein_obj).to(device)
         embedding_config = LogitsConfig(return_embeddings=True)
         with torch.no_grad():
             output = model.logits(protein_tensor, embedding_config)
         full_embedding = output.embeddings.squeeze(0).cpu()
-        
-        # --- 关键修正：根据您的建议，我们假设首尾是特殊字符并进行切片 ---
-        if full_embedding.shape[0] == len(full_protein_res_keys) + 2:
-            core_embedding = full_embedding[1:-1, :]
-        elif full_embedding.shape[0] == len(full_protein_res_keys):
-            # 如果长度恰好相等，也接受
-            core_embedding = full_embedding
-        else:
-            # 如果长度不匹配且不是+2的关系，则这是一个真正的错误
-            print(f"\n[!] WARNING: Embedding长度 ({full_embedding.shape[0]}) 与残基数 ({len(full_protein_res_keys)}) 的关系无法处理！ 文件: {protein_pdb_path}")
-            return None, None
-        
-        return core_embedding, full_protein_res_keys
+
+        # 步骤 3: 移除BOS/EOS token对应的embedding
+        # 对于序列输入，ESM-3总是在首尾添加特殊token
+        core_embedding = full_embedding[1:-1, :]
+
+        # 步骤 4: 验证长度
+        if core_embedding.shape[0] != len(res_keys):
+             print(f"\n[!] FATAL WARNING: 序列处理后长度依然不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}. File: {protein_pdb_path}")
+             return None, None
+             
+        return core_embedding, res_keys
 
     except Exception as e:
         print(f"\n[!] 处理完整蛋白 {protein_pdb_path} 时出错: {e}")
         return None, None
-
 
 def main(args):
     # 这部分代码与上一版相同，无需修改
@@ -113,8 +119,8 @@ def main(args):
             continue
             
         full_protein_path = full_protein_root / protein_fn
-        # 注意这里接收的是切片后的 core_embedding
-        core_embedding, full_res_keys = process_full_protein(str(full_protein_path), model, device)
+        # 使用新的、基于序列的处理函数
+        core_embedding, full_res_keys = process_protein_by_sequence(str(full_protein_path), model, device)
         
         if core_embedding is None:
             continue
@@ -125,16 +131,16 @@ def main(args):
             output_path = (pocket_data_root / pocket_fn).with_suffix('.pt')
             if output_path.exists():
                 continue
-
-            # 依然使用我们自己可靠的解析器
-            pocket_res_keys = get_residue_ids_from_pdb(pocket_data_root / pocket_fn)
+            
+            # 使用同样可靠的Biopython解析器来获取口袋的残基ID
+            pocket_res_keys = get_sequence_and_res_keys_from_pdb(pocket_data_root / pocket_fn)
             if pocket_res_keys is None:
                 continue
 
             indices_to_select = [res_key_to_idx_map[res_key] for res_key in pocket_res_keys if res_key in res_key_to_idx_map]
             
             if not indices_to_select:
-                print(f"\n{shard_info} WARNING: 对于口袋 {pocket_fn}, 未在完整蛋白中找到任何对应残基。")
+                # print(f"\n{shard_info} WARNING: 对于口袋 {pocket_fn}, 未在完整蛋白中找到任何对应残基。")
                 continue
 
             pocket_embedding = core_embedding[indices_to_select, :]
@@ -145,7 +151,8 @@ def main(args):
     print(f"{shard_info} 所有任务已成功处理完毕。")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="为CrossDocked数据集提取蛋白质embeddings (最终并行版)。")
+    # 参数解析部分保持不变
+    parser = argparse.ArgumentParser(description="为CrossDocked数据集提取蛋白质embeddings (最终序列版)。")
     parser.add_argument("--dataset_root", type=str, required=True, help="指向 'crossdocked_pocket' 数据集的根目录")
     parser.add_argument("--full_protein_root", type=str, required=True, help="指向包含完整蛋白质的 'crossdocked_v1.1_rmsd1.0' 目录")
     parser.add_argument("--num-shards", type=int, default=1, help="并行进程的总数")
