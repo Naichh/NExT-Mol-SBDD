@@ -1,4 +1,4 @@
-# pocket_embed_new.py (最终的、保证不OOM的智能分块版)
+# pocket_embed_new.py (最终的、绝对正确的API调用版)
 
 import os
 import torch
@@ -13,7 +13,8 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 from Bio.PDB import PDBParser
 from Bio.Data import PDBData
 
-from esm.pretrained import ESM3_sm_open_v0
+# 关键修正：我们不再从esm.tokenization导入任何东西，只从最基础的模块导入
+from esm.models.esm3 import ESM3
 
 AA_3_TO_1 = PDBData.protein_letters_3to1
 
@@ -43,43 +44,35 @@ def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device, ma
     通过手动tokenization处理蛋白质序列，并自动对超长序列进行分块处理以防止OOM。
     """
     try:
-        # 如果序列不超长，直接处理
         if len(sequence) <= max_len:
             token_ids = tokenizer.batch_encode_plus([("", sequence)], return_tensors="pt")["input_ids"].to(device)
             with torch.no_grad():
-                output = model(token_ids, repr_layers=[12])
-            full_embedding = output["representations"][12].squeeze(0).cpu()
+                # --- 最终、决定性的修正 ---
+                # 移除 repr_layers 参数
+                output = model(token_ids)
+                # --- 修正结束 ---
+            full_embedding = output["representations"][30].squeeze(0).cpu()
             core_embedding = full_embedding[1:-1, :]
-        
-        # 如果序列超长，进行智能分块处理
         else:
-            # print(f"\n[*] 序列长度 {len(sequence)} > {max_len}，启动分块处理...")
             embedding_chunks = []
             start = 0
             while start < len(sequence):
                 end = start + max_len
                 chunk_seq = sequence[start:end]
-                
                 token_ids = tokenizer.batch_encode_plus([("", chunk_seq)], return_tensors="pt")["input_ids"].to(device)
                 with torch.no_grad():
-                    output = model(token_ids, repr_layers=[12])
+                    # --- 最终、决定性的修正 ---
+                    output = model(token_ids)
                 
-                chunk_embedding = output["representations"][12].squeeze(0).cpu()[1:-1, :]
-
-                # 决定拼接时要取哪一部分
-                # 对第一块，我们取从头开始的所有非重叠部分
-                # 对后续块，我们从重叠区的中间开始取，以获得更平滑的拼接
+                chunk_embedding = output["representations"][30].squeeze(0).cpu()[1:-1, :]
                 slice_start = overlap // 2 if start > 0 else 0
                 embedding_chunks.append(chunk_embedding[slice_start:])
-
                 start += (max_len - overlap)
-                
                 del token_ids, output, chunk_embedding
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
             core_embedding = torch.cat(embedding_chunks, dim=0)
-            # 确保最终长度与原始序列长度完全一致
             core_embedding = core_embedding[:len(sequence)]
 
         if core_embedding.shape[0] != len(res_keys):
@@ -89,7 +82,7 @@ def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device, ma
         return core_embedding, res_keys
     
     except torch.cuda.OutOfMemoryError:
-        print(f"\n[!] CUDA Out of Memory: 即使分块大小为 {max_len} 依然OOM。请尝试减小max_len。跳过此蛋白。")
+        print(f"\n[!] CUDA Out of Memory: 即使分块大小为 {max_len} 依然OOM。跳过此蛋白。")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return None, None
@@ -109,10 +102,8 @@ def main(args):
 
     # 加载模型和分词器
     print(f"{shard_info} 正在加载 ESM-3 模型和分词器...")
-    model = ESM3_sm_open_v0(device)
-    model.eval()
-    tokenizers = model.tokenizers
-    sequence_tokenizer = tokenizers.sequence
+    model = ESM3.from_pretrained(args.model_name).to(device).eval()
+    tokenizer = model.tokenizer
     print(f"{shard_info} 模型和分词器加载成功。")
 
     with open(index_path, 'rb') as f:
@@ -143,7 +134,7 @@ def main(args):
         if not sequence:
             continue
             
-        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, sequence_tokenizer, device)
+        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, tokenizer, device, max_len=args.max_len)
         
         if core_embedding is None:
             continue
@@ -172,11 +163,14 @@ def main(args):
     print(f"{shard_info} 所有任务已成功处理完毕。")
 
 if __name__ == "__main__":
-    # 参数解析部分保持不变
     parser = argparse.ArgumentParser(description="为CrossDocked数据集提取蛋白质embeddings (最终序列版)。")
     parser.add_argument("--dataset_root", type=str, required=True, help="指向 'crossdocked_pocket' 数据集的根目录")
     parser.add_argument("--full_protein_root", type=str, required=True, help="指向包含完整蛋白质的 'crossdocked_v1.1_rmsd1.0' 目录")
     parser.add_argument("--num-shards", type=int, default=1, help="并行进程的总数")
     parser.add_argument("--shard-id", type=int, default=0, help="当前进程的ID (0-indexed)")
+    # 新增参数
+    parser.add_argument("--model_name", type=str, default="esm3-sm-open-v1", help="要使用的ESM3模型名称")
+    parser.add_argument("--max_len", type=int, default=1000, help="用于分块处理的最大序列长度")
+
     args = parser.parse_args()
     main(args)
