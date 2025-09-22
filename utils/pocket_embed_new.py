@@ -1,4 +1,4 @@
-# pocket_embed_new.py (最终、最可靠的序列优先版)
+# pocket_embed_new.py (最终的、决定性的底层接口版)
 
 import os
 import torch
@@ -14,7 +14,6 @@ from Bio.PDB import PDBParser
 from Bio.Data import PDBData
 
 from esm.models.esm3 import ESM3
-from esm.sdk.api import ESMProtein, LogitsConfig
 
 # Biopython使用三字母氨基酸码，我们需要一个转换字典
 AA_3_TO_1 = PDBData.protein_letters_3to1
@@ -22,15 +21,12 @@ AA_3_TO_1 = PDBData.protein_letters_3to1
 def get_sequence_and_res_keys_from_pdb(pdb_path):
     """
     使用Biopython从PDB文件中按顺序解析出标准的氨基酸序列和对应的(链ID, 残基序号)列表。
-    这是最可靠的获取序列和映射关系的方法。
     """
     try:
         parser = PDBParser(QUIET=True)
         structure = parser.get_structure("protein", pdb_path)
-        
         sequence = ""
         residue_keys = []
-        
         for model in structure:
             for chain in model:
                 for residue in chain:
@@ -45,43 +41,39 @@ def get_sequence_and_res_keys_from_pdb(pdb_path):
         print(f"\n[!] 使用Biopython解析PDB {pdb_path} 时出错: {e}")
         return None, None
 
-def process_protein_by_sequence(protein_pdb_path, model, device):
+def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device):
     """
-    通过先提取序列，再将序列字符串直接传递给模型的方式处理蛋白质。
-    这是最直接、最稳健的方法。
+    通过手动tokenization处理蛋白质序列，返回核心embedding和残基ID列表。
     """
     try:
-        # 步骤 1: 使用Biopython获取纯净的序列和可靠的残基映射 (此部分不变)
-        sequence, res_keys = get_sequence_and_res_keys_from_pdb(protein_pdb_path)
-        if not sequence:
-            print(f"\n[!] 无法从 {protein_pdb_path} 提取有效序列。")
-            return None, None
+        # 步骤 1: 使用分词器将序列字符串转换为Token ID
+        # tokenizer需要一个列表作为输入，所以我们将sequence放到列表中
+        token_ids = tokenizer([sequence], return_tensors="pt")["input_ids"].to(device)
 
-        # --- 最终、决定性的修正 ---
-        # 我们不再尝试创建ESMProtein对象，而是将序列字符串直接传递给model.encode()
-        protein_tensor = model.encode(sequence).to(device)
-        # --- 修正结束 ---
-
-        # 后续步骤与之前完全相同
-        embedding_config = LogitsConfig(return_embeddings=True)
+        # 步骤 2: 将Token ID直接喂给模型，并指定提取最后一层的表征
+        # 对于esm3-sm-open-v1 (12层)，我们提取第12层的输出
         with torch.no_grad():
-            output = model.logits(protein_tensor, embedding_config)
-        full_embedding = output.embeddings.squeeze(0).cpu()
+            output = model(token_ids, repr_layers=[12])
+        
+        # 提取embedding，它的形状是 (1, length, dim)
+        full_embedding = output["representations"][12].squeeze(0).cpu()
 
+        # 步骤 3: 移除BOS/EOS token对应的embedding
         core_embedding = full_embedding[1:-1, :]
 
+        # 步骤 4: 验证长度
         if core_embedding.shape[0] != len(res_keys):
-             print(f"\n[!] FATAL WARNING: 序列处理后长度依然不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}. File: {protein_pdb_path}")
+             print(f"\n[!] FATAL WARNING: 最终方案长度依然不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}.")
              return None, None
              
         return core_embedding, res_keys
 
     except Exception as e:
-        print(f"\n[!] 处理完整蛋白 {protein_pdb_path} 时出错: {e}")
+        print(f"\n[!] Tokenization或模型推理时出错: {e}")
         return None, None
 
 def main(args):
-    # 这部分代码与上一版相同，无需修改
+    # 路径和设备设置
     pocket_data_root = Path(args.dataset_root)
     full_protein_root = Path(args.full_protein_root)
     index_path = pocket_data_root / "index.pkl"
@@ -90,15 +82,15 @@ def main(args):
     print(f"{shard_info} -> 口袋数据根目录: {pocket_data_root}")
     print(f"{shard_info} -> 完整蛋白根目录: {full_protein_root}")
 
-    print(f"{shard_info} 正在加载 ESM-3 模型到 {device}...")
+    # 加载模型和分词器
+    print(f"{shard_info} 正在加载 ESM-3 模型和分词器...")
     model = ESM3.from_pretrained("esm3-sm-open-v1").to(device).eval()
-    print(f"{shard_info} 模型加载成功。")
+    tokenizer = ESM3.get_tokenizer() # 获取官方分词器
+    print(f"{shard_info} 模型和分词器加载成功。")
 
-    if not index_path.exists():
-        raise FileNotFoundError(f"未找到主索引文件: {index_path}")
+    # 加载并分片索引
     with open(index_path, 'rb') as f:
         master_index = pickle.load(f)
-
     pocket_to_protein_map = {item[0]: item[2] for item in master_index if item[0] is not None and item[2] is not None}
     all_pockets = sorted(list(pocket_to_protein_map.keys()))
     pockets_for_this_shard = [p for i, p in enumerate(all_pockets) if i % args.num_shards == args.shard_id]
@@ -113,14 +105,20 @@ def main(args):
             
     print(f"{shard_info} 总共分配到 {len(pockets_for_this_shard)} 个口袋，涉及 {len(protein_to_pockets_map)} 个独立蛋白质。")
 
+    # 主循环
     for protein_fn, pocket_fns in tqdm(protein_to_pockets_map.items(), desc=f"{shard_info} 处理中", position=args.shard_id):
         all_done = all([(pocket_data_root / fn).with_suffix('.pt').exists() for fn in pocket_fns])
         if all_done:
             continue
             
         full_protein_path = full_protein_root / protein_fn
-        # 使用新的、基于序列的处理函数
-        core_embedding, full_res_keys = process_protein_by_sequence(str(full_protein_path), model, device)
+        
+        # 核心逻辑：先解析，再送入处理函数
+        sequence, full_res_keys = get_sequence_and_res_keys_from_pdb(str(full_protein_path))
+        if not sequence:
+            continue
+            
+        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, tokenizer, device)
         
         if core_embedding is None:
             continue
@@ -132,15 +130,14 @@ def main(args):
             if output_path.exists():
                 continue
             
-            # 使用同样可靠的Biopython解析器来获取口袋的残基ID
+            # 使用同样的Biopython解析器获取口袋的残基ID
             pocket_res_keys = get_sequence_and_res_keys_from_pdb(pocket_data_root / pocket_fn)
-            if pocket_res_keys is None:
+            if not pocket_res_keys:
                 continue
 
             indices_to_select = [res_key_to_idx_map[res_key] for res_key in pocket_res_keys if res_key in res_key_to_idx_map]
             
             if not indices_to_select:
-                # print(f"\n{shard_info} WARNING: 对于口袋 {pocket_fn}, 未在完整蛋白中找到任何对应残基。")
                 continue
 
             pocket_embedding = core_embedding[indices_to_select, :]
