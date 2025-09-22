@@ -47,29 +47,29 @@ def get_sequence_and_res_keys_from_pdb(pdb_path):
 
 def process_protein_by_sequence(protein_pdb_path, model, device):
     """
-    通过先提取序列，再输入模型的方式处理蛋白质，返回核心embedding和残基ID列表。
+    通过先提取序列，再将序列字符串直接传递给模型的方式处理蛋白质。
+    这是最直接、最稳健的方法。
     """
     try:
-        # 步骤 1: 使用Biopython获取纯净的序列和可靠的残基映射
+        # 步骤 1: 使用Biopython获取纯净的序列和可靠的残基映射 (此部分不变)
         sequence, res_keys = get_sequence_and_res_keys_from_pdb(protein_pdb_path)
         if not sequence:
             print(f"\n[!] 无法从 {protein_pdb_path} 提取有效序列。")
             return None, None
 
-        # 步骤 2: 将序列字符串喂给模型
-        # 注意：ESMProtein.from_sequence() 是创建对象的方法
-        protein_obj = ESMProtein.from_sequence(sequence)
-        protein_tensor = model.encode(protein_obj).to(device)
+        # --- 最终、决定性的修正 ---
+        # 我们不再尝试创建ESMProtein对象，而是将序列字符串直接传递给model.encode()
+        protein_tensor = model.encode(sequence).to(device)
+        # --- 修正结束 ---
+
+        # 后续步骤与之前完全相同
         embedding_config = LogitsConfig(return_embeddings=True)
         with torch.no_grad():
             output = model.logits(protein_tensor, embedding_config)
         full_embedding = output.embeddings.squeeze(0).cpu()
 
-        # 步骤 3: 移除BOS/EOS token对应的embedding
-        # 对于序列输入，ESM-3总是在首尾添加特殊token
         core_embedding = full_embedding[1:-1, :]
 
-        # 步骤 4: 验证长度
         if core_embedding.shape[0] != len(res_keys):
              print(f"\n[!] FATAL WARNING: 序列处理后长度依然不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}. File: {protein_pdb_path}")
              return None, None
