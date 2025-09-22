@@ -15,9 +15,11 @@ def verify_consistency():
 
     try:
         # --- 1. 定义两个数据集的根目录 ---
-        base_dir = Path("/data/share/liuzhiyuan/nai/NExT-Mol/datasets/sbdd")
-        pocket_data_root = base_dir / "crossdocked_pocket"
-        full_protein_root = base_dir / "crossdocked_v1.1_rmsd1.0"
+        base_dir1 = Path("/data/share/liuzhiyuan/nai/NExT-Mol/datasets/sbdd")
+        base_dir2=Path("/data/share/liuzhiyuan/nai/NExT-Mol/datasets")
+        full_protein_root = base_dir2 / "crossdocked_v1.1_rmsd1.0"
+
+        pocket_data_root = base_dir1 / "crossdocked_pocket"
         
         index_path = pocket_data_root / "index.pkl"
 
