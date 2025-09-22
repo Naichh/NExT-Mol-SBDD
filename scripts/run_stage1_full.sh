@@ -85,7 +85,7 @@ torchrun --nproc_per_node=4 --master_port=54346  llm_train_cross_docked.py \
     --max_pocket_tokens 128 \
     --llm_model "$LLM_MODEL_ID" \
     --llm_tune 'full' \
-    --unfreeze_epoch 0 \
+    --unfreeze_epoch 3 \
     --accelerator 'gpu' \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\

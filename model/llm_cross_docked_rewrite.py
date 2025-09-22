@@ -176,36 +176,23 @@ class LLMPL(L.LightningModule):
         tokenizer.add_eos_token = True
         return tokenizer
 
+    def on_train_epoch_start(self):
+        # 这个逻辑现在对LoRA和Full-finetuning都有效
+        if self.current_epoch == self.unfreeze_epoch:
+            print(f"\nEpoch {self.current_epoch}: Unfreezing all LLM parameters for end-to-end finetuning...")
+            for param in self.llm_model.parameters():
+                param.requires_grad = True
+            # 打印一下，确保解冻成功
+            if hasattr(self.llm_model, 'print_trainable_parameters'):
+                self.llm_model.print_trainable_parameters()
     # def on_train_epoch_start(self):
-    #     if self.current_epoch == self.unfreeze_epoch:
-    #         print(f"Epoch {self.current_epoch}: Unfreezing parameters...")
-    #         if getattr(self, "delta_train", False):
-    #             # 只解冻 LoRA 参数
-    #             print("→ LoRA fine-tuning enabled. Unfreezing only LoRA parameters.")
-    #             for name, param in self.llm_model.named_parameters():
-    #                 if "lora" in name:
-    #                     param.requires_grad = True
-    #         else:
-    #             # 全部参数解冻
-    #             print("→ Full fine-tuning enabled. Unfreezing all parameters.")
-    #             for name, param in self.llm_model.named_parameters():
-    #                 param.requires_grad = True
-    # def on_train_epoch_start(self):
-
     #     if self.current_epoch == self.unfreeze_epoch and self.delta_train:
-    #         print(f"Epoch {self.current_epoch}: Unfreezing LoRA parameters...")
+    #         print(f"Epoch {self.current_epoch}: Unfreezing LoRA parameters for fine-tuning...")
     #         # 只解冻 LoRA 参数
     #         for name, param in self.llm_model.named_parameters():
     #             if "lora" in name:
     #                 param.requires_grad = True
-    def on_train_epoch_start(self):
-        if self.current_epoch == self.unfreeze_epoch and self.delta_train:
-            print(f"Epoch {self.current_epoch}: Unfreezing LoRA parameters for fine-tuning...")
-            # 只解冻 LoRA 参数
-            for name, param in self.llm_model.named_parameters():
-                if "lora" in name:
-                    param.requires_grad = True
-            self.llm_model.print_trainable_parameters()    
+    #         self.llm_model.print_trainable_parameters()    
     
     @classmethod
     def init_llm(cls, args):
@@ -291,6 +278,7 @@ class LLMPL(L.LightningModule):
         self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=False)
         self.projection = torch.nn.Sequential(
                 torch.nn.Linear(1536, self.hidden_size * 4),
+                torch.nn.LayerNorm(self.hidden_size * 4),
                 torch.nn.GELU(), 
                 torch.nn.Dropout(p=0.1),
                 torch.nn.Linear(self.hidden_size * 4, self.llm_model.config.hidden_size)
@@ -317,7 +305,12 @@ class LLMPL(L.LightningModule):
         # 确保 projection 层始终是可训练的
         for param in self.projection.parameters():
             param.requires_grad = True
-
+        if args.unfreeze_epoch > 0:
+            print(f"INFO: Staged training enabled. LLM parameters will be frozen until epoch {args.unfreeze_epoch}.")
+            for name, param in self.llm_model.named_parameters():
+                # 我们只冻结非lora的核心LLM参数
+                if 'lora' not in name:
+                    param.requires_grad = False
         self.save_hyperparameters(args)
 
     # def training_step(self, batch, batch_idx):
