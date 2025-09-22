@@ -141,6 +141,11 @@ def obtain_loss_and_ppl(logits, labels, attn_mask, return_nll=False, context_len
 
 
 class LLMPL(L.LightningModule):
+    def _init_weights(self, m):
+        if isinstance(m, torch.nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.constant_(m.bias, 0)    
     def configure_optimizers(self):
         self.trainer.fit_loop.setup_data()
         warmup_steps = min(len(self.trainer.train_dataloader), self.args.warmup_steps)
@@ -311,15 +316,7 @@ class LLMPL(L.LightningModule):
                 if 'lora' in name:
                     param.requires_grad = False
 
-        # 确保 projection 层始终是可训练的
-        for param in self.projection.parameters():
-            param.requires_grad = True
-        if args.unfreeze_epoch > 0:
-            print(f"INFO: Staged training enabled. LLM parameters will be frozen until epoch {args.unfreeze_epoch}.")
-            for name, param in self.llm_model.named_parameters():
-                # 我们只冻结非lora的核心LLM参数
-                if 'lora' not in name:
-                    param.requires_grad = False
+
         self.save_hyperparameters(args)
 
     # def training_step(self, batch, batch_idx):

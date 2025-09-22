@@ -719,3 +719,4 @@ SBDD Stage 1 运行执行完毕。
 标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250922_222947/sbdd_full-finetune_20250922_222947/training_out.log
 错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250922_222947/sbdd_full-finetune_20250922_222947/training_err.log
 模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250922_222947
+SBDD Stage 1 运行执行完毕。
