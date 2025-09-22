@@ -1,4 +1,4 @@
-# pocket_embed_new.py (最终的、决定性的解决方案)
+# pocket_embed_new.py (采纳您的建议，最终简洁稳健版)
 
 import os
 import torch
@@ -11,71 +11,68 @@ import warnings
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-# 导入Biopython的PDB解析器，ESM SDK在底层也使用它
-# 这能保证我们用完全相同的方式来解析口袋文件
-from Bio.PDB import PDBParser
-
 from esm.models.esm3 import ESM3
 from esm.sdk.api import ESMProtein, LogitsConfig
 
-def get_pocket_residue_keys_from_pdb(pocket_pdb_path):
+def get_residue_ids_from_pdb(pdb_path):
     """
-    使用Biopython从口袋PDB文件中解析并返回一个唯一的(链ID, 残基序号)元组列表。
-    这能确保我们的解析逻辑与ESM的底层逻辑最大程度上保持一致。
+    从PDB文件中按顺序解析并返回一个唯一的(链ID, 残基序号)元组列表。
+    这个简单、可靠的解析器是我们的“唯一真理”。
     """
     try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("pocket", pocket_pdb_path)
+        with open(pdb_path, 'r', errors='ignore') as f:
+            lines = f.readlines()
+        
         residue_keys = []
         seen_keys = set()
-        for model in structure:
-            for chain in model:
-                for residue in chain:
-                    # residue.get_id() 返回一个元组, e.g., (' ', 10, ' ')
-                    # 我们只取中间的残基序号
-                    res_id = residue.get_id()[1]
-                    chain_id = chain.get_id()
-                    key = (chain_id, res_id)
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        residue_keys.append(key)
+        for line in lines:
+            if line.startswith("ATOM"):
+                chain_id = line[21].strip()
+                res_id = int(line[22:26].strip())
+                key = (chain_id, res_id)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    residue_keys.append(key)
         return residue_keys
     except Exception as e:
-        print(f"\n[!] 使用Biopython解析口袋 {pocket_pdb_path} 时出错: {e}")
+        print(f"\n[!] 解析PDB文件 {pdb_path} 时出错: {e}")
         return None
 
 def process_full_protein(protein_pdb_path, model, device):
     """
-    处理一个完整的蛋白质PDB文件，返回完整的embedding和从ESMProtein对象直接提取的残基ID列表。
+    处理一个完整的蛋白质PDB文件，返回切片后的核心embedding和从PDB直接解析的残基ID列表。
     """
     try:
+        # 步骤 1: 我们自己从PDB文件解析出物理残基ID列表
+        full_protein_res_keys = get_residue_ids_from_pdb(protein_pdb_path)
+        if not full_protein_res_keys:
+            return None, None
+
+        # 步骤 2: 使用ESM SDK加载PDB并生成完整的embedding
         protein = ESMProtein.from_pdb(protein_pdb_path)
-
-        # --- 最终修正：直接从ESMProtein对象获取真实的残基映射 ---
-        # 这个列表与embedding的每一行都完美对应
-        full_protein_res_keys = []
-        for chain in protein: # 迭代protein对象会得到Chain对象
-            for residue in chain: # 迭代Chain对象会得到Residue对象
-                full_protein_res_keys.append((residue.chain_id, residue.residx))
-        # --- 修正结束 ---
-
         protein_tensor = model.encode(protein).to(device)
         embedding_config = LogitsConfig(return_embeddings=True)
         with torch.no_grad():
             output = model.logits(protein_tensor, embedding_config)
         full_embedding = output.embeddings.squeeze(0).cpu()
         
-        # 验证步骤现在应该总是会通过
-        if full_embedding.shape[0] != len(full_protein_res_keys):
-             # 理论上，这里的代码不应该再被执行
-             print(f"\n[!] FATAL WARNING: 长度依然不匹配！Emb: {full_embedding.shape[0]}, Keys: {len(full_protein_res_keys)}. File: {protein_pdb_path}")
-             return None, None
-             
-        return full_embedding, full_protein_res_keys
+        # --- 关键修正：根据您的建议，我们假设首尾是特殊字符并进行切片 ---
+        if full_embedding.shape[0] == len(full_protein_res_keys) + 2:
+            core_embedding = full_embedding[1:-1, :]
+        elif full_embedding.shape[0] == len(full_protein_res_keys):
+            # 如果长度恰好相等，也接受
+            core_embedding = full_embedding
+        else:
+            # 如果长度不匹配且不是+2的关系，则这是一个真正的错误
+            print(f"\n[!] WARNING: Embedding长度 ({full_embedding.shape[0]}) 与残基数 ({len(full_protein_res_keys)}) 的关系无法处理！ 文件: {protein_pdb_path}")
+            return None, None
+        
+        return core_embedding, full_protein_res_keys
 
     except Exception as e:
         print(f"\n[!] 处理完整蛋白 {protein_pdb_path} 时出错: {e}")
         return None, None
+
 
 def main(args):
     # 这部分代码与上一版相同，无需修改
@@ -116,9 +113,10 @@ def main(args):
             continue
             
         full_protein_path = full_protein_root / protein_fn
-        full_embedding, full_res_keys = process_full_protein(str(full_protein_path), model, device)
+        # 注意这里接收的是切片后的 core_embedding
+        core_embedding, full_res_keys = process_full_protein(str(full_protein_path), model, device)
         
-        if full_embedding is None:
+        if core_embedding is None:
             continue
 
         res_key_to_idx_map = {res_key: i for i, res_key in enumerate(full_res_keys)}
@@ -128,8 +126,8 @@ def main(args):
             if output_path.exists():
                 continue
 
-            # 使用新的、更可靠的Biopython解析器
-            pocket_res_keys = get_pocket_residue_keys_from_pdb(pocket_data_root / pocket_fn)
+            # 依然使用我们自己可靠的解析器
+            pocket_res_keys = get_residue_ids_from_pdb(pocket_data_root / pocket_fn)
             if pocket_res_keys is None:
                 continue
 
@@ -139,7 +137,7 @@ def main(args):
                 print(f"\n{shard_info} WARNING: 对于口袋 {pocket_fn}, 未在完整蛋白中找到任何对应残基。")
                 continue
 
-            pocket_embedding = full_embedding[indices_to_select, :]
+            pocket_embedding = core_embedding[indices_to_select, :]
             
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(pocket_embedding, output_path)
