@@ -1,4 +1,4 @@
-# pocket_embed_new.py (最终的、绝对正确的API调用版)
+# preprocess_unified.py (最终的、统一并行版)
 
 import os
 import torch
@@ -8,13 +8,15 @@ from pathlib import Path
 from tqdm import tqdm
 import warnings
 
+# 导入 Accelerate
+from accelerate import Accelerator
+
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 from Bio.PDB import PDBParser
 from Bio.Data import PDBData
 
-# 关键修正：我们不再从esm.tokenization导入任何东西，只从最基础的模块导入
-from esm.models.esm3 import ESM3
+from esm.pretrained import ESM3_sm_open_v0
 
 AA_3_TO_1 = PDBData.protein_letters_3to1
 
@@ -36,105 +38,106 @@ def get_sequence_and_res_keys_from_pdb(pdb_path):
                         residue_keys.append((chain_id, res_id))
         return sequence, residue_keys
     except Exception as e:
-        print(f"\n[!] 使用Biopython解析PDB {pdb_path} 时出错: {e}")
+        print(f"\n[!] 解析PDB {pdb_path.name} 出错: {e}")
         return None, None
 
-def process_protein_by_sequence(sequence, res_keys, model, tokenizers, device, max_len=1000, overlap=100):
-    """
-    通过手动tokenization处理蛋白质序列，并自动对超长序列进行分块处理以防止OOM。
-    """
+def process_protein(sequence, res_keys, model, tokenizer, device):
+    """使用最基础的API调用处理蛋白质序列。"""
     try:
-        if len(sequence) <= max_len:
-            token_ids = tokenizers.batch_encode_plus([("", sequence)], return_tensors="pt")["input_ids"].to(device)
-            with torch.no_grad():
-                # --- 最终、决定性的修正 ---
-                # 移除 repr_layers 参数
-                output = model(token_ids)
-                # --- 修正结束 ---
-            full_embedding = output["representations"][30].squeeze(0).cpu()
-            core_embedding = full_embedding[1:-1, :]
-        else:
-            embedding_chunks = []
-            start = 0
-            while start < len(sequence):
-                end = start + max_len
-                chunk_seq = sequence[start:end]
-                token_ids = tokenizers.batch_encode_plus([("", chunk_seq)], return_tensors="pt")["input_ids"].to(device)
-                with torch.no_grad():
-                    # --- 最终、决定性的修正 ---
-                    output = model(token_ids)
-                
-                chunk_embedding = output["representations"][30].squeeze(0).cpu()[1:-1, :]
-                slice_start = overlap // 2 if start > 0 else 0
-                embedding_chunks.append(chunk_embedding[slice_start:])
-                start += (max_len - overlap)
-                del token_ids, output, chunk_embedding
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        tokens = tokenizer.encode(sequence)
+        # 注意：对于Accelerate的模型并行，输入需要直接在目标设备上
+        token_ids = torch.tensor(tokens, dtype=torch.int64).to(device).unsqueeze(0)
 
-            core_embedding = torch.cat(embedding_chunks, dim=0)
-            core_embedding = core_embedding[:len(sequence)]
+        with torch.no_grad():
+            output = model.forward(sequence_tokens=token_ids)
+        
+        full_embedding = output.embeddings.squeeze(0).cpu()
+        core_embedding = full_embedding[1:-1, :]
 
         if core_embedding.shape[0] != len(res_keys):
-             print(f"\n[!] FATAL WARNING: 长度不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}.")
-             return None, None
+             print(f"\n[!] 长度不匹配! Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}.")
+             return None
              
-        return core_embedding, res_keys
-    
-    except torch.cuda.OutOfMemoryError:
-        print(f"\n[!] CUDA Out of Memory: 即使分块大小为 {max_len} 依然OOM。跳过此蛋白。")
+        return core_embedding
+
+    except Exception as e:
+        print(f"\n[!] 推理时出错: {e}")
+        # 在多卡模式下，确保显存被清理
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        return None, None
-    except Exception as e:
-        print(f"\n[!] Tokenization或模型推理时出错: {e}")
-        return None, None
+        return None
 
-def main(args):
-    # 路径和设备设置
+def main():
+    parser = argparse.ArgumentParser(description="为CrossDocked数据集提取蛋白质embeddings (统一并行版)。")
+    parser.add_argument("--dataset_root", type=str, required=True, help="指向 'crossdocked_pocket' 数据集的根目录")
+    parser.add_argument("--full_protein_root", type=str, required=True, help="指向 'crossdocked_v1.1_rmsd1.0' 目录")
+    args = parser.parse_args()
+
+    # --- 1. 初始化 Accelerator ---
+    # 这会自动处理多进程设置、GPU分配等
+    accelerator = Accelerator()
+    device = accelerator.device # 每个进程会被分配到不同的device
+    shard_info = f"[进程 {accelerator.process_index}/{accelerator.num_processes} on {str(device)}]"
+    
+    # --- 2. 使用 Accelerate 加载模型 ---
+    # device_map="auto" 会自动将模型切分到所有可用的硬件上（包括多GPU和CPU）
+    # 只有主进程打印加载信息，避免刷屏
+    if accelerator.is_main_process:
+        print(f"[*] 正在使用 Accelerate 加载 ESM-3 模型 (device_map='auto')...")
+    
+    # low_cpu_mem_usage=True 配合 device_map 在加载大模型时优化内存使用
+    model = ESM3_sm_open_v0(device_map="auto", low_cpu_mem_usage=True)
+    model.eval()
+    sequence_tokenizer = model.tokenizers.sequence
+    
+    if accelerator.is_main_process:
+        print(f"[*] 模型和分词器加载成功。")
+
+    # --- 3. 所有进程加载索引，但只有主进程打印信息 ---
     pocket_data_root = Path(args.dataset_root)
     full_protein_root = Path(args.full_protein_root)
     index_path = pocket_data_root / "index.pkl"
-    device = torch.device("cuda")
-    shard_info = f"[分片 {args.shard_id}/{args.num_shards}]"
-    print(f"{shard_info} -> 口袋数据根目录: {pocket_data_root}")
-    print(f"{shard_info} -> 完整蛋白根目录: {full_protein_root}")
-
-    # 加载模型和分词器
-    print(f"{shard_info} 正在加载 ESM-3 模型和分词器...")
-    model = ESM3.from_pretrained(args.model_name).to(device).eval()
-    tokenizers = model.tokenizers
-    print(f"{shard_info} 模型和分词器加载成功。")
 
     with open(index_path, 'rb') as f:
         master_index = pickle.load(f)
 
     pocket_to_protein_map = {item[0]: item[2] for item in master_index if item[0] is not None and item[2] is not None}
     all_pockets = sorted(list(pocket_to_protein_map.keys()))
-    pockets_for_this_shard = [p for i, p in enumerate(all_pockets) if i % args.num_shards == args.shard_id]
     
     protein_to_pockets_map = {}
-    for pocket_fn in pockets_for_this_shard:
-        protein_fn = pocket_to_protein_map.get(pocket_fn)
-        if protein_fn:
-            if protein_fn not in protein_to_pockets_map:
-                protein_to_pockets_map[protein_fn] = []
-            protein_to_pockets_map[protein_fn].append(pocket_fn)
-            
-    print(f"{shard_info} 总共分配到 {len(pockets_for_this_shard)} 个口袋，涉及 {len(protein_to_pockets_map)} 个独立蛋白质。")
+    for pocket, protein in pocket_to_protein_map.items():
+        if protein not in protein_to_pockets_map:
+            protein_to_pockets_map[protein] = []
+        protein_to_pockets_map[protein].append(pocket)
 
-    for protein_fn, pocket_fns in tqdm(protein_to_pockets_map.items(), desc=f"{shard_info} 处理中", position=args.shard_id):
+    all_proteins = sorted(list(protein_to_pockets_map.keys()))
+    
+    # --- 4. 自动任务分片 ---
+    # 每个进程只获取自己需要处理的那一部分蛋白质列表
+    proteins_for_this_process = all_proteins[accelerator.process_index::accelerator.num_processes]
+    
+    if accelerator.is_main_process:
+        print(f"[*] 总共发现 {len(all_proteins)} 个独立蛋白质。")
+    print(f"{shard_info} 分配到 {len(proteins_for_this_process)} 个蛋白质进行处理。")
+    
+    accelerator.wait_for_everyone() # 等待所有进程准备就绪
+
+    # --- 5. 主循环 ---
+    for protein_fn in tqdm(proteins_for_this_process, desc=shard_info, position=accelerator.process_index):
+        pocket_fns = protein_to_pockets_map[protein_fn]
         all_done = all([(pocket_data_root / fn).with_suffix('.pt').exists() for fn in pocket_fns])
         if all_done:
             continue
             
         full_protein_path = full_protein_root / protein_fn
-        
         sequence, full_res_keys = get_sequence_and_res_keys_from_pdb(str(full_protein_path))
         if not sequence:
             continue
-            
-        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, tokenizers, device, max_len=args.max_len)
+        
+        # 将数据移动到当前进程的主设备上
+        # 对于device_map="auto"的模型, 输入到 .to(device) 是一个好习惯,
+        # accelerate会处理好后续的跨设备数据传输
+        core_embedding = process_protein(sequence, full_res_keys, model, sequence_tokenizer, device)
         
         if core_embedding is None:
             continue
@@ -143,34 +146,21 @@ def main(args):
         
         for pocket_fn in pocket_fns:
             output_path = (pocket_data_root / pocket_fn).with_suffix('.pt')
-            if output_path.exists():
-                continue
+            if output_path.exists(): continue
             
             _, pocket_res_keys = get_sequence_and_res_keys_from_pdb(pocket_data_root / pocket_fn)
-            if not pocket_res_keys:
-                continue
+            if not pocket_res_keys: continue
 
-            indices_to_select = [res_key_to_idx_map[res_key] for res_key in pocket_res_keys if res_key in res_key_to_idx_map]
+            indices_to_select = [res_key_to_idx_map.get(res_key) for res_key in pocket_res_keys]
+            indices_to_select = [idx for idx in indices_to_select if idx is not None]
+
+            if not indices_to_select: continue
             
-            if not indices_to_select:
-                continue
-
             pocket_embedding = core_embedding[indices_to_select, :]
-            
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(pocket_embedding, output_path)
 
     print(f"{shard_info} 所有任务已成功处理完毕。")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="为CrossDocked数据集提取蛋白质embeddings (最终序列版)。")
-    parser.add_argument("--dataset_root", type=str, required=True, help="指向 'crossdocked_pocket' 数据集的根目录")
-    parser.add_argument("--full_protein_root", type=str, required=True, help="指向包含完整蛋白质的 'crossdocked_v1.1_rmsd1.0' 目录")
-    parser.add_argument("--num-shards", type=int, default=1, help="并行进程的总数")
-    parser.add_argument("--shard-id", type=int, default=0, help="当前进程的ID (0-indexed)")
-    # 新增参数
-    parser.add_argument("--model_name", type=str, default="esm3-sm-open-v1", help="要使用的ESM3模型名称")
-    parser.add_argument("--max_len", type=int, default=1000, help="用于分块处理的最大序列长度")
-
-    args = parser.parse_args()
-    main(args)
+    main()
