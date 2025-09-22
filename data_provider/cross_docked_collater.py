@@ -18,21 +18,31 @@ class LMCollater:
             attention_mask[i, L - n:] = 1
         return input_embeddings, attention_mask
 
+
     def __call__(self, batch):
+        # 关键修改：在处理之前，过滤掉所有值为 None 的无效样本
+        batch = [item for item in batch if item is not None]
+        
+        # 如果过滤后整个批次都空了，返回None，让训练循环跳过
+        if not batch:
+            return None, None, None, None, None, None
+
+        # --- 后续的所有代码都和原来完全一样 ---
         selfies = [item['selfies'] for item in batch]
         selfies2 = [item['selfies2'] for item in batch]
         pockets = [item['pdb_embedding'] for item in batch]
         ground_truth_mols = [item['rdmol'] for item in batch]
-        pocket_paths = [item['pdb_path'] for item in batch] # 新增
+        pocket_paths = [item['pdb_path'] for item in batch]
 
         selfies_batch = self.tokenizer(selfies, padding='max_length', return_tensors='pt',
-                                       max_length=self.max_sf_tokens, truncation=True, add_special_tokens=True)
+                                    max_length=self.max_sf_tokens, truncation=True, add_special_tokens=True)
         selfies2_batch = self.tokenizer(selfies2, padding='max_length', return_tensors='pt',
                                         max_length=self.max_sf_tokens, truncation=True, add_special_tokens=True)
 
         pocket_embs, pocket_mask = self.prepare_inputs_for_causal_lm_left_pad(pockets, self.max_pocket_tokens)
 
-        return selfies_batch, selfies2_batch, pocket_embs, pocket_mask,ground_truth_mols,pocket_paths
+        return selfies_batch, selfies2_batch, pocket_embs, pocket_mask, ground_truth_mols, pocket_paths
+
 
 class LMInferCollater:
     def __init__(self, tokenizer, max_pocket_tokens):

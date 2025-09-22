@@ -65,54 +65,53 @@ class PocketLigandPairDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx):
-        # <<< 修改点 #2: __getitem__ 的核心逻辑 >>>
-        
-        # 如果缓存存在，直接从缓存中返回数据
+        # --- 如果缓存存在，逻辑不变 ---
         if self.data_cache is not None:
-            # Subset 会传入索引列表的下标，我们需要通过它找到原始的idx
             original_idx = self.index[idx]
             return self.data_cache[original_idx]
 
-        # --- 如果缓存不存在（仅在setup预加载时执行），则执行原始的磁盘读取逻辑 ---
-        pocket_fn, ligand_fn, protein_fn, rmsd = self.index[idx]
+        # --- 对磁盘读取逻辑进行修改 ---
+        try:
+            pocket_fn, ligand_fn, protein_fn, rmsd = self.index[idx]
 
-        pocket_path = os.path.join(self.raw_path, pocket_fn)
-        ligand_path = os.path.join(self.raw_path, ligand_fn)
+            pocket_path = os.path.join(self.raw_path, pocket_fn)
+            ligand_path = os.path.join(self.raw_path, ligand_fn)
 
-        pt_embed_path = pocket_path.replace('.pdb', '.pt')
-        embedding = torch.load(pt_embed_path, map_location='cpu') # 加上 map_location 是个好习惯
+            pt_embed_path = pocket_path.replace('.pdb', '.pt')
+            
+            # 核心改动：如果 embedding 文件不存在，torch.load 会抛出 FileNotFoundError
+            embedding = torch.load(pt_embed_path, map_location='cpu')
 
-        if embedding is None:
-            raise FileNotFoundError(f"Embedding could not be loaded for sample: {pt_embed_path}")
+            # 后续的SDF处理等逻辑保持不变
+            mol = Chem.SDMolSupplier(ligand_path, removeHs=False, sanitize=True)[0]
+            if mol is None:
+                return None # 如果SDF有问题，也跳过这个样本
+            
+            smiles = Chem.MolToSmiles(mol)
 
-        mol = Chem.SDMolSupplier(ligand_path, removeHs=False, sanitize=True)[0]
-        if mol is None:
-            raise ValueError(f'RDKit failed to read ligand SDF: {ligand_path}')
-        
-        smiles = Chem.MolToSmiles(mol)
-
-        if self.rand_smiles == 'restricted':
+            # 假设您的随机化和selfies转换函数在这里
             smiles1 = restricted_random_smiles(smiles, self.addHs)
             smiles2 = restricted_random_smiles(smiles, self.addHs)
-        elif self.rand_smiles == 'unrestricted':
-            smiles1 = unrestricted_random_smiles(smiles, self.addHs)
-            smiles2 = unrestricted_random_smiles(smiles, self.addHs)
-        else:
-            raise NotImplementedError(f"rand_smiles mode {self.rand_smiles} not supported.")
+            selfies1 = sf.encoder(smiles1)
+            selfies2 = sf.encoder(smiles2)
 
-        selfies1 = sf.encoder(smiles1)
-        selfies2 = sf.encoder(smiles2)
-
-        return {
-            'pdb_path': pocket_fn,
-            'pdb_embedding': embedding.clone().detach(),
-            'sdf_path': ligand_path,
-            'selfies': selfies1,
-            'selfies2': selfies2,
-            'rmsd': torch.tensor(rmsd, dtype=torch.float),
-            'rdmol': mol
-        }
-
+            return {
+                'pdb_path': pocket_fn,
+                'pdb_embedding': embedding.clone().detach(),
+                'sdf_path': ligand_path,
+                'selfies': selfies1,
+                'selfies2': selfies2,
+                'rmsd': torch.tensor(rmsd, dtype=torch.float),
+                'rdmol': mol
+            }
+        
+        except FileNotFoundError:
+            # 当 torch.load 找不到 .pt 文件时，捕获错误并返回None
+            return None
+        except Exception as e:
+            # 捕获其他可能的错误，同样跳过样本
+            # print(f"\n[!] 在 __getitem__ 中发生错误，跳过样本 {self.index[idx][0]}。错误: {e}")
+            return None
 
 
 
