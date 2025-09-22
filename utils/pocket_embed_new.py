@@ -1,4 +1,4 @@
-# pocket_embed_new.py (回归事实的最终版)
+# pocket_embed_new.py (根据错误提示修正的最终版)
 
 import os
 import torch
@@ -13,8 +13,8 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 from Bio.PDB import PDBParser
 from Bio.Data import PDBData
 
-# 关键修正：我们只从最基础的模块导入ESM3
-from esm.models.esm3 import ESM3
+# 关键修正：导入与官方示例一致的模块
+from esm.pretrained import ESM3_sm_open_v0
 
 AA_3_TO_1 = PDBData.protein_letters_3to1
 
@@ -40,20 +40,25 @@ def get_sequence_and_res_keys_from_pdb(pdb_path):
         return None, None
 
 def process_protein_by_sequence(sequence, res_keys, model, tokenizer, device):
-    """通过手动tokenization处理蛋白质序列，返回核心embedding和残基ID列表。"""
+    """通过官方示例展示的、最直接的方式处理蛋白质序列。"""
     try:
-        # 使用从模型实例中获取的分词器
-        token_ids = tokenizer.batch_encode_plus([("", sequence)], return_tensors="pt")["input_ids"].to(device)
+        # 步骤 1: 使用分词器将序列字符串转换为Token ID
+        tokens = tokenizer.encode(sequence)
+        token_ids = torch.tensor(tokens, dtype=torch.int64).to(device).unsqueeze(0) # 添加batch维度
 
-        # 将Token ID直接喂给模型，并指定提取最后一层的表征
+        # 步骤 2: 将Token ID直接喂给模型
         with torch.no_grad():
-            output = model(token_ids, repr_layers=[12])
+            output = model.forward(sequence_tokens=token_ids)
         
-        full_embedding = output["representations"][12].squeeze(0).cpu()
+        # 步骤 3: 从ESMOutput对象中提取embedding
+        full_embedding = output.embeddings.squeeze(0).cpu()
+
+        # 步骤 4: 移除BOS/EOS token对应的embedding
         core_embedding = full_embedding[1:-1, :]
 
+        # 步骤 5: 验证长度
         if core_embedding.shape[0] != len(res_keys):
-             print(f"\n[!] FATAL WARNING: 长度不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}. File Path: {res_keys}")
+             print(f"\n[!] FATAL WARNING: 长度不匹配！Emb: {core_embedding.shape[0]}, Keys: {len(res_keys)}.")
              return None, None
              
         return core_embedding, res_keys
@@ -72,10 +77,12 @@ def main(args):
     print(f"{shard_info} -> 口袋数据根目录: {pocket_data_root}")
     print(f"{shard_info} -> 完整蛋白根目录: {full_protein_root}")
 
-    # --- 最终修正：回归到从模型实例获取分词器 ---
+    # --- 最终修正：使用 model.tokenizers.sequence ---
     print(f"{shard_info} 正在加载 ESM-3 模型和分词器...")
-    model = ESM3.from_pretrained("esm3-sm-open-v1").to(device).eval()
-    tokenizer = model.tokenizer # 这是被验证过的、在您环境中有效的方法
+    model = ESM3_sm_open_v0(device) # 使用示例中的加载方式
+    model.eval()
+    tokenizers = model.tokenizers      # 获取复数形式的tokenizers集合
+    sequence_tokenizer = tokenizers.sequence # 从集合中获取我们需要的序列分词器
     print(f"{shard_info} 模型和分词器加载成功。")
     # --- 修正结束 ---
 
@@ -107,7 +114,7 @@ def main(args):
         if not sequence:
             continue
             
-        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, tokenizer, device)
+        core_embedding, _ = process_protein_by_sequence(sequence, full_res_keys, model, sequence_tokenizer, device)
         
         if core_embedding is None:
             continue
