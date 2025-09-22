@@ -142,36 +142,33 @@ def obtain_loss_and_ppl(logits, labels, attn_mask, return_nll=False, context_len
 
 class LLMPL(L.LightningModule):
     def configure_optimizers(self):
-        if self.delta_train:
-            self.scheduler = None
-            optimizer = optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=1e-4, weight_decay=self.args.weight_decay)
-            return optimizer
         self.trainer.fit_loop.setup_data()
-        
         warmup_steps = min(len(self.trainer.train_dataloader), self.args.warmup_steps)
+        
         adapter_params = [p for n, p in self.named_parameters() if 'projection' in n or 'embedding_norm' in n]
         llm_params = [p for n, p in self.named_parameters() if 'projection' not in n and 'embedding_norm' not in n]
         
-        # 确保所有参数都被分配了
-        all_params = set(p for p in self.parameters())
-        assigned_params = set(adapter_params) | set(llm_params)
-        assert len(all_params - assigned_params) == 0, "Some parameters are not assigned to any optimizer group!"
+        # --- 核心修正: 使用“零学习率”策略以兼容DeepSpeed ---
+        initial_llm_lr = 0.0
+        if self.unfreeze_epoch == 0:
+            initial_llm_lr = self.args.init_lr / 10.0
+        
+        print(f"INFO: Initializing optimizer. Adapter LR: {self.args.init_lr}, LLM LR: {initial_llm_lr}")
 
         optimizer_grouped_parameters = [
-            {"params": adapter_params, "lr": self.args.init_lr}, # e.g., 5e-5
-            {"params": llm_params, "lr": self.args.init_lr / 10.0} # e.g., 5e-6
+            {"params": adapter_params, "lr": self.args.init_lr},
+            {"params": llm_params, "lr": initial_llm_lr} # 初始时LLM学习率为0
         ]
+        # --- 修正结束 ---
 
         optimizer = optim.AdamW(optimizer_grouped_parameters, weight_decay=self.args.weight_decay)
-        
         
         max_iters = self.args.max_epochs * len(self.trainer.train_dataloader)
         if self.args.scheduler == 'linear_warmup_cosine_lr':
             self.scheduler = LinearWarmupCosineLRSchedulerV2(optimizer, max_iters, self.args.min_lr, self.args.init_lr, warmup_steps, self.args.warmup_lr)
-        elif self.args.scheduler == 'None':
-            self.scheduler = None
         else:
-            raise NotImplementedError()
+            self.scheduler = None
+            
         return optimizer
     @classmethod
     def init_tokenizer(cls, args):
@@ -192,14 +189,11 @@ class LLMPL(L.LightningModule):
         return tokenizer
 
     def on_train_epoch_start(self):
-        # 这个逻辑现在对LoRA和Full-finetuning都有效
-        if self.current_epoch == self.unfreeze_epoch:
-            print(f"\nEpoch {self.current_epoch}: Unfreezing all LLM parameters for end-to-end finetuning...")
-            for param in self.llm_model.parameters():
-                param.requires_grad = True
-            # 打印一下，确保解冻成功
-            if hasattr(self.llm_model, 'print_trainable_parameters'):
-                self.llm_model.print_trainable_parameters()
+        if self.current_epoch == self.unfreeze_epoch and self.unfreeze_epoch > 0:
+            target_llm_lr = self.args.init_lr / 10.0
+            print(f"\nEpoch {self.current_epoch}: Unfreezing LLM parameters by setting LR to {target_llm_lr}...")
+            self.trainer.optimizers[0].param_groups[1]['lr'] = target_llm_lr
+            print("INFO: LLM parameter group LR updated.")
     # def on_train_epoch_start(self):
     #     if self.current_epoch == self.unfreeze_epoch and self.delta_train:
     #         print(f"Epoch {self.current_epoch}: Unfreezing LoRA parameters for fine-tuning...")
@@ -298,7 +292,9 @@ class LLMPL(L.LightningModule):
         )
         self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=False)
 
-
+               # --- 应用权重初始化 ---
+        print("INFO: Applying Xavier uniform initialization to the projection adapter.")
+        self.projection.apply(self._init_weights)
         # TODO: add pockets embeddings related code
         # self.projection = torch.nn.Sequential(
         #         torch.nn.Linear(1536, self.hidden_size * 2),
