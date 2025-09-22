@@ -1,0 +1,88 @@
+venv/
+env/
+.venv/
+.env/
+ENV/
+*.egg-info/
+dist/
+build/
+wheels/
+parts/
+var/
+sdist/
+develop-eggs/
+wandb/
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# ===================================================================
+# IDEs and Editors
+# 忽略您和团队成员可能使用的各种编辑器的配置，这些都是个人化的
+# ===================================================================
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# PyCharm
+.idea/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+# 如果您只希望分享最终的Notebook，可以取消下面这行的注释
+# *.ipynb
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+
+
+data/
+datasets/
+*.csv
+*.json
+*.xml
+*.zip
+*.gz
+*.pkl
+*.parquet
+*.hdf5
+
+# 模型权重和 checkpoints
+all_checkpoints/
+checkpoints/
+saved_models/
+lightning_logs/
+
+*.pt
+*.pth
+*.h5
+*.onnx
+*.pb
+
+#日志
+logs/
+log/
+wandb/
+mlruns/
+tensorboard/
+.DS_Store
+results/
+testscripts/
+/temp_output
+/moses
+/mol_utils
+/results
+.env
+*.env
+secrets.yml
+config.local.ini
+local_settings.py
+
+

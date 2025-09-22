@@ -933,6 +933,8 @@ class GeomDrugsDataModule(L.LightningDataModule):
 
 
 
+
+
 class QM9LMDataModule(L.LightningDataModule):
     def __init__(
         self,
@@ -1096,6 +1098,168 @@ class QM9LMDataModule(L.LightningDataModule):
         parser.add_argument('--root', type=str, default='data/qm9')
         return parent_parser
 
+class SBDDDataModule(L.LightningDataModule):
+    def __init__(
+        self,
+        root: str = 'data/',
+        num_workers: int = 0,
+        batch_size: int = 256,
+        selfies_tokenizer = None,
+        args=None,
+    ):
+        super().__init__()
+        self.root = root
+        self.num_workers = num_workers
+        self.batch_size = batch_size
+        self.selfies_tokenizer = selfies_tokenizer
+
+        if not hasattr(args, 'condition_property') or args.condition_property == None:
+            self.transform = None
+        elif args.condition_property in ['mu', 'alpha', 'homo', 'lumo', 'gap', 'Cv']:
+            dataset_info = get_dataset_info('qm9_second_half')
+            prop2idx = dataset_info['prop2idx']
+            include_aromatic = False
+            self.transform = EdgeComCondTransform(dataset_info['atom_encoder'].values(), include_aromatic, prop2idx[args.condition_property])
+        else:
+            raise NotImplementedError(f"{args.conditon} is not supported")
+
+        rand_smiles = args.rand_smiles if args is not None else 'None'
+        dataset = QM9LMDataset(root=root, selfies_tokenizer=selfies_tokenizer, rand_smiles=rand_smiles, aug_inv=args.aug_inv > 0)
+        self.dataset = dataset
+        max_atoms = int(dataset._data.num_atom.max()) + 2 # +2 because of the bos and eos token;
+        self.max_atoms = max_atoms
+        print('QM9 max num atoms', max_atoms)
+
+        ## obtain max selfies token length
+        selfies_list = dataset._data['selfies']
+        selfies_lens = [len(list(sf.split_selfies(selfies))) for selfies in selfies_list]
+        if args.addHs:
+            self.max_sf_tokens = max(max(selfies_lens) + 2 + 5, 96) # +2 because of the bos and eos token; +5 to enlarge the space of molecule sampling
+        else:
+            self.max_sf_tokens = max(selfies_lens) + 2 + 5 # +2 because of the bos and eos token; +5 to enlarge the space of molecule sampling
+
+        print('max selfies tokens', self.max_sf_tokens)
+
+        if args.condition_property == None:
+            splits = dataset.get_idx_split()
+            train_idx = splits['train']
+            valid_idx = splits['valid']
+            test_idx = splits['test']
+        elif args.condition_property in ['mu', 'alpha', 'homo', 'lumo', 'gap', 'Cv']:
+            splits = dataset.get_cond_idx_split()
+            first_train_idx = splits['first_train']
+            second_train_idx = splits['second_train']
+            valid_idx = splits['valid']
+            test_idx = splits['test']
+
+            train_idx = second_train_idx
+
+        ## filter the ones without selfies
+        selfies = np.array(dataset._data.selfies)
+
+        print('before filtering', len(train_idx), len(valid_idx), len(test_idx))
+        train_idx = train_idx[train_idx < len(dataset)]
+        valid_idx = valid_idx[valid_idx < len(dataset)]
+        test_idx = test_idx[test_idx < len(dataset)]
+        train_idx = train_idx[selfies[train_idx] != np.array('')]
+        valid_idx = valid_idx[selfies[valid_idx] != np.array('')]
+        test_idx = test_idx[selfies[test_idx] != np.array('')]
+        print('after filtering', len(train_idx), len(valid_idx), len(test_idx))
+        self.train_dataset = dataset.index_select(train_idx)
+        self.test_dataset = dataset.index_select(test_idx)
+        self.predict_dataset = None
+
+        if args.condition_property == None:
+            self.prop_norms = None
+            self.prop_dist = None
+            pass
+        elif args.condition_property in ['mu', 'alpha', 'homo', 'lumo', 'gap', 'Cv']:
+            prop2idx_sub = {
+                args.condition_property: prop2idx[args.condition_property]
+            }
+            self.prop_norms = dataset.index_select(valid_idx).compute_property_mean_mad(prop2idx_sub)
+            self.prop_dist = DistributionProperty(dataset.index_select(train_idx), prop2idx_sub, normalizer=self.prop_norms)
+            self.nodes_dist = get_node_dist(dataset_info)
+        else:
+            raise NotImplementedError(f"{args.conditon} is not supported")
+
+        ## load rdmols of subsets
+        rdmols = dataset._data.rdmol
+        train_idx = train_idx.tolist()
+        valid_idx = valid_idx.tolist()
+        test_idx = test_idx.tolist()
+        self.train_rdmols = [rdmols[i] for i in train_idx]
+        self.valid_rdmols = [rdmols[i] for i in valid_idx]
+        self.test_rdmols = [rdmols[i] for i in test_idx]
+
+        self.get_moses_metrics = get_moses_metrics(self.test_rdmols, 1)
+        self.get_sub_geometry_metric = get_sub_geometry_metric(self.test_rdmols, get_dataset_info('qm9_with_h'), os.path.join(root, 'processed'))
+
+    def train_dataloader(self):
+        loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=False,
+            drop_last=True,
+            persistent_workers=True,
+            collate_fn=LMCollater(
+                tokenizer=self.selfies_tokenizer,
+                max_sf_tokens=self.max_sf_tokens,
+                transform=self.transform,
+                condition=(self.transform is not None),
+                prop_norm=self.prop_norms if self.transform is not None else None
+            ),
+        )
+        return loader
+
+    def val_dataloader(self):
+        loader = DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size // 2,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=False,
+            drop_last=False,
+            persistent_workers=False,
+            collate_fn=LMCollater(
+                tokenizer=self.selfies_tokenizer,
+                max_sf_tokens=self.max_sf_tokens,
+                transform=self.transform,
+                condition=(self.transform is not None),
+                prop_norm=self.prop_norms if self.transform is not None else None
+            ),
+        )
+        return loader
+
+    def predict_dataloader(self):
+        assert self.predict_dataset is not None
+        loader = DataLoader(
+                self.predict_dataset,
+                batch_size=16,
+                shuffle=False,
+                num_workers=self.num_workers * 2,
+                pin_memory=False,
+                drop_last=False,
+                persistent_workers=False,
+                collate_fn=LMCollater(
+                    tokenizer=self.selfies_tokenizer,
+                    max_sf_tokens=self.max_sf_tokens,
+                    transform=self.transform,
+                    condition=(self.transform is not None),
+                    prop_norm=self.prop_norms if self.transform is not None else None
+            ),
+            )
+        return loader
+
+    def add_model_specific_args(parent_parser):
+        parser = parent_parser.add_argument_group("Data module")
+        parser.add_argument('--num_workers', type=int, default=4)
+        parser.add_argument('--batch_size', type=int, default=128)
+        parser.add_argument('--rand_smiles', type=str, default='')
+        parser.add_argument('--root', type=str, default='data/qm9')
+        return parent_parser
 
 class GeomDrugsLMDataModule(L.LightningDataModule):
     def __init__(

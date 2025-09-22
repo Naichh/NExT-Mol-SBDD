@@ -459,14 +459,14 @@ def set_rdmol_positions(rdkit_mol, pos, removeHs=True, add_conformer=False):
         rdkit_mol = Chem.RemoveHs(rdkit_mol)
     if add_conformer:
         num_atoms = rdkit_mol.GetNumAtoms()
-        assert num_atoms == pos.shape[0], f'{num_atoms} != {pos.shape[0]}, {pos.shape=}'
+        assert num_atoms == pos.shape[0], f'{num_atoms} != {pos.shape[0]}, pos.shape = {pos.shape}'
         conf = Chem.Conformer(num_atoms)
         for i in range(num_atoms):
             conf.SetAtomPosition(i, pos[i].tolist())
         rdkit_mol.AddConformer(conf, assignId=True)
     elif rdkit_mol.GetNumConformers() == 0:
         num_atoms = rdkit_mol.GetNumAtoms()
-        assert num_atoms == pos.shape[0], f'{num_atoms} != {pos.shape[0]}, {pos.shape=}'
+        assert num_atoms == pos.shape[0], f'{num_atoms} != {pos.shape[0]}, pos.shape = {pos.shape}'
         conf = Chem.Conformer(num_atoms)
         for i in range(num_atoms):
             conf.SetAtomPosition(i, pos[i].tolist())
