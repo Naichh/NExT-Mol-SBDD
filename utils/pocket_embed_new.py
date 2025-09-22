@@ -32,7 +32,7 @@ def get_pocket_residue_ids(pocket_pdb_path):
 def process_full_protein(protein_pdb_path, model, device):
     """处理一个完整的蛋白质PDB文件，返回完整的embedding和残基ID列表。"""
     try:
-        protein = ESMProtein.from_pdb(protein_pdb_path, chain_ids=None)
+        protein = ESMProtein.from_pdb(protein_pdb_path)
         full_protein_res_ids = [res_id for chain_id, res_id in protein.residue_indexes]
         protein_tensor = model.encode(protein).to(device)
         embedding_config = LogitsConfig(return_embeddings=True)
