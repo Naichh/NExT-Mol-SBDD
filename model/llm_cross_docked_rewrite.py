@@ -294,11 +294,11 @@ class LLMPL(L.LightningModule):
 
         self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=False)
         self.projection = torch.nn.Sequential(
-        torch.nn.Linear(1536, self.hidden_size * 4),
-        torch.nn.LayerNorm(self.hidden_size * 4), 
+        torch.nn.Linear(1536, 1024),
+        torch.nn.LayerNorm(1024), 
         torch.nn.GELU(),
-        torch.nn.Dropout(p=0.3),
-        torch.nn.Linear(self.hidden_size * 4, self.hidden_size)
+        torch.nn.Dropout(p=0.2),
+        torch.nn.Linear(1024, self.hidden_size)
         )
         self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=False)
 

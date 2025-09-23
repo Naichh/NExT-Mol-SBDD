@@ -59,7 +59,7 @@ echo "模型将保存在: ${CHECKPOINTS_DIR}"
 # 确保输出目录存在
 
 
-torchrun --nproc_per_node=2 --master_port=54347  llm_train_cross_docked.py \
+torchrun --nproc_per_node=2 --master_port=54346  llm_train_cross_docked.py \
     --output_dir "$CHECKPOINTS_DIR" \
     --filename "$RUN_NAME" \
     --seed 42 \
@@ -71,7 +71,7 @@ torchrun --nproc_per_node=2 --master_port=54347  llm_train_cross_docked.py \
     --temperature 0.2 \
     --do_sample \
     --generate_eval_epoch 5 \
-    --save_every_n_epochs 5 \
+    --save_every_n_epochs 6 \
     --check_val_every_n_epoch 1 \
     --dataset_root "$SBDD_DATA_ROOT" \
     --split_file "$SPLIT_FILE" \
@@ -79,7 +79,7 @@ torchrun --nproc_per_node=2 --master_port=54347  llm_train_cross_docked.py \
     --num_output_3d 5 \
     --num_beams 1 \
     --num_workers 6 \
-    --eval_2d_every_n_epochs 5 \
+    --eval_2d_every_n_epochs 3 \
     --eval_3d_every_n_epochs 200 \
     --max_sf_tokens 128 \
     --max_pocket_tokens 128 \
@@ -89,12 +89,12 @@ torchrun --nproc_per_node=2 --master_port=54347  llm_train_cross_docked.py \
     --accelerator 'gpu' \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\
-    --init_lr 1e-3 \
-    --min_lr 1e-5 \
+    --init_lr 2e-5 \
+    --min_lr 1e-6 \
     --gradient_clip_val 1.0 \
     --epoch_without_eval 0 \
-    --attention_dropout 0.1 \
-    --weight_decay 0.05 \
+    --attention_dropout 0.2 \
+    --weight_decay 0.15 \
     --strategy_name 'deepspeed' \
     > "${RESULTS_DIR}/training_out.log" \
     2> "${RESULTS_DIR}/training_err.log"
