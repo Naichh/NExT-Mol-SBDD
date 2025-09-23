@@ -154,45 +154,27 @@ class LLMPL(L.LightningModule):
         self.trainer.fit_loop.setup_data()
         warmup_steps = min(len(self.trainer.train_dataloader), self.args.warmup_steps)
         
-        # --- 新增：为Weight Decay创建更精细的参数分组 (来自上一轮的优化) ---
-        no_decay = ["bias", "LayerNorm.weight", "embedding_norm", "post_projection_norm"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in self.named_parameters() if not any(nd in n for nd in no_decay) and p.requires_grad],
-                "weight_decay": self.args.weight_decay,
-            },
-            {
-                "params": [p for n, p in self.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad],
-                "weight_decay": 0.0,
-            },
-        ]
-
-        # --- 核心修改：为每个参数组设置独立的 lr 和 min_lr ---
-        initial_llm_lr = 0.0
-        min_llm_lr = 0.0 # 在冻结期间，最小学习率也为0
+        # --- 核心修改：不再分组，所有可训练参数使用统一的学习率 ---
+        print(f"INFO: Initializing optimizer with a single learning rate for all trainable parameters.")
         
-        if self.unfreeze_epoch == 0:
-            initial_llm_lr = self.args.init_lr / 100.0 # <-- 差分比例100倍
-            min_llm_lr = self.args.min_lr / 100.0
-        
-        # 遍历所有参数组（包括有decay和无decay的），为它们设置学习率
-        for param_group in optimizer_grouped_parameters:
-            first_param_name = next(iter(param_group["params"]))._get_name() if len(param_group["params"]) > 0 else ""
-            if 'projection' in first_param_name or 'embedding_norm' in first_param_name:
-                param_group["lr"] = self.args.init_lr
-                param_group["min_lr"] = self.args.min_lr # <-- 为适配器组添加min_lr
-            else:
-                param_group["lr"] = initial_llm_lr
-                param_group["min_lr"] = min_llm_lr # <-- 为LLM组添加min_lr
-
-        print(f"INFO: Initializing optimizer. Adapter LR: {self.args.init_lr} -> {self.args.min_lr}, LLM LR: {initial_llm_lr} -> {min_llm_lr}")
-
-        optimizer = optim.AdamW(optimizer_grouped_parameters)
+        # self.parameters() 会自动返回所有 requires_grad=True 的参数
+        optimizer = optim.AdamW(
+            self.parameters(), 
+            lr=self.args.init_lr, 
+            weight_decay=self.args.weight_decay
+        )
+        # --- 修改结束 ---
         
         max_iters = self.args.max_epochs * len(self.trainer.train_dataloader)
         if self.args.scheduler == 'linear_warmup_cosine_lr':
-            # 调度器现在不再需要init_lr和min_lr，因为它会从optimizer的组中读取
-            self.scheduler = LinearWarmupCosineLRSchedulerV2(optimizer, max_iters, warmup_iters=warmup_steps)
+            # 调度器现在也只基于全局的学习率工作
+            self.scheduler = LinearWarmupCosineLRSchedulerV2(
+                optimizer, 
+                max_iters, 
+                min_lr=self.args.min_lr,
+                init_lr=self.args.init_lr, 
+                warmup_iters=warmup_steps
+            )
         else:
             self.scheduler = None
             
@@ -215,24 +197,6 @@ class LLMPL(L.LightningModule):
         tokenizer.add_eos_token = True
         return tokenizer
 
-    def on_train_epoch_start(self):
-        if self.current_epoch == self.unfreeze_epoch and self.unfreeze_epoch > 0:
-            target_llm_lr = self.args.init_lr / 100.0
-            target_min_llm_lr = self.args.min_lr / 100.0
-            print(f"\nEpoch {self.current_epoch}: Unfreezing LLM parameters by setting LR to {target_llm_lr} -> {target_min_llm_lr}...")
-            
-            for param_group in self.trainer.optimizers[0].param_groups:
-                first_param_name = next(iter(param_group["params"]))._get_name() if len(param_group["params"]) > 0 else ""
-                # 找到不属于适配器的组（即LLM组）
-                if 'projection' not in first_param_name and 'embedding_norm' not in first_param_name:
-                    param_group['lr'] = target_llm_lr
-                    param_group['min_lr'] = target_min_llm_lr
-
-            # 更新调度器内部记录的基准学习率
-            self.scheduler.initial_lrs = [g.get('lr', 0.0) for g in self.trainer.optimizers[0].param_groups]
-            self.scheduler.min_lrs = [g.get('min_lr', 0.0) for g in self.trainer.optimizers[0].param_groups]
-
-            print("INFO: LLM parameter group LR and Min_LR updated.")
     # def on_train_epoch_start(self):
     #     if self.current_epoch == self.unfreeze_epoch and self.delta_train:
     #         print(f"Epoch {self.current_epoch}: Unfreezing LoRA parameters for fine-tuning...")
