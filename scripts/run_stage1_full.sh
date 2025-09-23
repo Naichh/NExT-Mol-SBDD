@@ -49,7 +49,7 @@ mkdir -p "$CHECKPOINTS_DIR"
 
 
 # --- 4. 执行命令 ---
-export CUDA_VISIBLE_DEVICES='2,3'
+export CUDA_VISIBLE_DEVICES='0,1'
 
 echo "开始执行SBDD Stage 1: 全量微调..."
 echo "标准输出日志将保存在: ${RESULTS_DIR}/training_out.log"
