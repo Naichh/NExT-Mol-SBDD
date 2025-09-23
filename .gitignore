@@ -16,7 +16,7 @@ wandb/
 __pycache__/
 *.py[cod]
 *$py.class
-
+sync.sh
 
 # ===================================================================
 # IDEs and Editors
