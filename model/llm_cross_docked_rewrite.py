@@ -65,42 +65,43 @@ def worker_generate_3d(data_pair):
     except Exception:
         return None, None, selfies_string
 class LinearWarmupCosineLRSchedulerV2:
-    def __init__(self, optimizer, max_iters, warmup_iters=0):
+    def __init__(
+        self,
+        optimizer,
+        max_iters,
+        min_lr,
+        init_lr,
+        warmup_iters=0,
+        warmup_start_lr=-1,
+        **kwargs
+    ):
         self.optimizer = optimizer
         self.max_iters = max_iters
+        self.min_lr = min_lr
+        self.init_lr = init_lr
         self.warmup_iters = warmup_iters
-        # 从optimizer的参数组中直接记录下每个组的初始和最小学习率
-        self.initial_lrs = [g.get('lr', 0.0) for g in optimizer.param_groups]
-        self.min_lrs = [g.get('min_lr', 0.0) for g in optimizer.param_groups]
+        self.warmup_start_lr = warmup_start_lr if warmup_start_lr >= 0 else init_lr
+        self.lr_decay_iters = max_iters
 
-    def get_progress_coeff(self, it):
-        """计算当前步数的衰减进度系数 (0到1之间)"""
-        # 1) 预热阶段
+    def get_lr(self, it):
+        # 1) linear warmup
         if it < self.warmup_iters:
-            return it / self.warmup_iters
-        # 2) 衰减阶段
-        decay_ratio = (it - self.warmup_iters) / (self.max_iters - self.warmup_iters)
-        decay_ratio = min(1.0, decay_ratio) # 确保不超过1
+            return self.init_lr * it / self.warmup_iters
+        # 2) if it > lr_decay_iters, return min learning rate
+        if it > self.lr_decay_iters:
+            return self.min_lr
+        # 3) in between, use cosine decay
+        decay_ratio = (it - self.warmup_iters) / (self.lr_decay_iters - self.warmup_iters)
+        assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return coeff
+        return self.min_lr + coeff * (self.init_lr - self.min_lr)
 
     def step(self, cur_step):
-        progress_coeff = self.get_progress_coeff(cur_step)
-        
-        # 遍历每个参数组，根据各自的初始和最小学习率，按比例更新
-        for i, param_group in enumerate(self.optimizer.param_groups):
-            initial_lr = self.initial_lrs[i]
-            min_lr = self.min_lrs[i]
-            
-            # 在预热阶段，从0线性增长到initial_lr
-            if cur_step < self.warmup_iters:
-                 param_group['lr'] = initial_lr * progress_coeff
-            # 在衰减阶段，从initial_lr余弦衰减到min_lr
-            else:
-                 param_group['lr'] = min_lr + (initial_lr - min_lr) * progress_coeff
-        
-        # 返回第一个组的学习率用于日志记录
-        return self.optimizer.param_groups[0]['lr']
+        lr = self.get_lr(cur_step)
+        # 将计算出的学习率应用到所有参数组
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+        return lr
 
 
 def get_half_precision_dtype():
