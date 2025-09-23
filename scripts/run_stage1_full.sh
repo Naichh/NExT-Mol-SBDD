@@ -49,7 +49,7 @@ mkdir -p "$CHECKPOINTS_DIR"
 
 
 # --- 4. 执行命令 ---
-export CUDA_VISIBLE_DEVICES='0,1,2,3'
+export CUDA_VISIBLE_DEVICES='2,3'
 
 echo "开始执行SBDD Stage 1: 全量微调..."
 echo "标准输出日志将保存在: ${RESULTS_DIR}/training_out.log"
@@ -59,7 +59,7 @@ echo "模型将保存在: ${CHECKPOINTS_DIR}"
 # 确保输出目录存在
 
 
-torchrun --nproc_per_node=4 --master_port=54346  llm_train_cross_docked.py \
+torchrun --nproc_per_node=2 --master_port=54347  llm_train_cross_docked.py \
     --output_dir "$CHECKPOINTS_DIR" \
     --filename "$RUN_NAME" \
     --seed 42 \
@@ -85,17 +85,16 @@ torchrun --nproc_per_node=4 --master_port=54346  llm_train_cross_docked.py \
     --max_pocket_tokens 128 \
     --llm_model "$LLM_MODEL_ID" \
     --llm_tune 'full' \
-    --unfreeze_epoch 3 \
+    --unfreeze_epoch 0 \
     --accelerator 'gpu' \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\
-    --init_lr 1e-5 \
-    --min_lr 5e-6 \
+    --init_lr 1e-3 \
+    --min_lr 1e-5 \
     --gradient_clip_val 1.0 \
     --epoch_without_eval 0 \
-    --attention_dropout 0.05 \
-    --lora_dropout 0.05 \
-    --weight_decay 0.01 \
+    --attention_dropout 0.1 \
+    --weight_decay 0.05 \
     --strategy_name 'deepspeed' \
     > "${RESULTS_DIR}/training_out.log" \
     2> "${RESULTS_DIR}/training_err.log"

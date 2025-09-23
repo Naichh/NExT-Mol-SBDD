@@ -26,23 +26,26 @@ from rdkit.Chem import AllChem
 from collections import defaultdict # Make sure this is imported
 
 from evaluation.eval_functions import run_full_evaluation 
-# 在文件顶部，LLMPL 类的外部
-class ResidualAdapter(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.1):
-        super().__init__()
-        self.block = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, hidden_dim),
-            torch.nn.LayerNorm(hidden_dim),
-            torch.nn.GELU(),
-            torch.nn.Dropout(p=dropout),
-            torch.nn.Linear(hidden_dim, output_dim)
-        )
-        # 这个捷径层用于匹配输入和输出的维度
-        self.shortcut = torch.nn.Linear(input_dim, output_dim) if input_dim != output_dim else torch.nn.Identity()
 
-    def forward(self, x):
-        # H(x) = F(x) + x
-        return self.block(x) + self.shortcut(x)
+
+# class ResidualAdapter(torch.nn.Module):
+#     def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.1):
+#         super().__init__()
+#         self.block = torch.nn.Sequential(
+#             torch.nn.Linear(input_dim, hidden_dim),
+#             torch.nn.LayerNorm(hidden_dim),
+#             torch.nn.GELU(),
+#             torch.nn.Dropout(p=dropout),
+#             torch.nn.Linear(hidden_dim, output_dim)
+#         )
+#         # 这个捷径层用于匹配输入和输出的维度
+#         self.shortcut = torch.nn.Linear(input_dim, output_dim) if input_dim != output_dim else torch.nn.Identity()
+
+#     def forward(self, x):
+#         # H(x) = F(x) + x
+#         return self.block(x) + self.shortcut(x)
+    
+    
 def worker_generate_3d(data_pair):
 
     selfies_string, pocket_path = data_pair
@@ -290,10 +293,12 @@ class LLMPL(L.LightningModule):
         self.hidden_size = self.llm_model.config.hidden_size
 
         self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=False)
-        self.projection = ResidualAdapter(
-            input_dim=1536,
-            hidden_dim=self.hidden_size * 4,
-            output_dim=self.hidden_size
+        self.projection = torch.nn.Sequential(
+        torch.nn.Linear(1536, self.hidden_size * 4),
+        torch.nn.LayerNorm(self.hidden_size * 4), 
+        torch.nn.GELU(),
+        torch.nn.Dropout(p=0.3),
+        torch.nn.Linear(self.hidden_size * 4, self.hidden_size)
         )
         self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=False)
 
