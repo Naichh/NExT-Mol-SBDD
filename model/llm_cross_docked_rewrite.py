@@ -337,6 +337,8 @@ class LLMPL(L.LightningModule):
         # return loss
 
     def training_step(self, batch, batch_idx):
+        if batch[0] is None:
+            return None
         if self.scheduler:
             self.scheduler.step(self.trainer.global_step)
         
