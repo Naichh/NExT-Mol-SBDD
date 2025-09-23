@@ -64,31 +64,28 @@ class PocketLigandPairDataset(Dataset):
     def __len__(self):
         return len(self.index)
 
+    # 最终确认版的 __getitem__ 函数
     def __getitem__(self, idx):
-        # --- 如果缓存存在，逻辑不变 ---
-        if self.data_cache is not None:
-            original_idx = self.index[idx]
-            return self.data_cache[original_idx]
-
-        # --- 对磁盘读取逻辑进行修改 ---
         try:
-            pocket_fn, ligand_fn, protein_fn, rmsd = self.index[idx]
+            # --- 缓存逻辑被包裹在try内部 ---
+            if self.data_cache is not None:
+                original_idx = self.index[idx]
+                return self.data_cache[original_idx]
 
+            # --- 磁盘读取逻辑 ---
+            pocket_fn, ligand_fn, protein_fn, rmsd = self.index[idx]
             pocket_path = os.path.join(self.raw_path, pocket_fn)
             ligand_path = os.path.join(self.raw_path, ligand_fn)
-
             pt_embed_path = pocket_path.replace('.pdb', '.pt')
             
-            # 核心改动：如果 embedding 文件不存在，torch.load 会抛出 FileNotFoundError
             embedding = torch.load(pt_embed_path, map_location='cpu')
 
-            # 后续的SDF处理等逻辑保持不变
             mol = Chem.SDMolSupplier(ligand_path, removeHs=False, sanitize=True)[0]
             if mol is None:
-                return None # 如果SDF有问题，也跳过这个样本
+                return None
             
             smiles = Chem.MolToSmiles(mol)
-
+            
             # 假设您的随机化和selfies转换函数在这里
             smiles1 = restricted_random_smiles(smiles, self.addHs)
             smiles2 = restricted_random_smiles(smiles, self.addHs)
@@ -106,13 +103,11 @@ class PocketLigandPairDataset(Dataset):
             }
         
         except FileNotFoundError:
-            # 当 torch.load 找不到 .pt 文件时，捕获错误并返回None
-            return None
+            return None # 优雅地处理文件缺失
         except Exception as e:
-            # 捕获其他可能的错误，同样跳过样本
-            # print(f"\n[!] 在 __getitem__ 中发生错误，跳过样本 {self.index[idx][0]}。错误: {e}")
+            # 捕获其他任何可能的错误，防止worker崩溃
+            # print(f"\n[!] 在 __getitem__ 中发生未知错误，跳过样本。错误: {e}")
             return None
-
 
 
 

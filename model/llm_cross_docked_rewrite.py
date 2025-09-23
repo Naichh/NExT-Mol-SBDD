@@ -65,42 +65,42 @@ def worker_generate_3d(data_pair):
     except Exception:
         return None, None, selfies_string
 class LinearWarmupCosineLRSchedulerV2:
-    def __init__(
-        self,
-        optimizer,
-        max_iters,
-        min_lr,
-        init_lr,
-        warmup_iters=0,
-        warmup_start_lr=-1,
-        **kwargs
-    ):
+    def __init__(self, optimizer, max_iters, warmup_iters=0):
         self.optimizer = optimizer
         self.max_iters = max_iters
-        self.min_lr = min_lr
-        self.init_lr = init_lr
         self.warmup_iters = warmup_iters
-        self.warmup_start_lr = warmup_start_lr if warmup_start_lr >= 0 else init_lr
-        self.lr_decay_iters = max_iters
+        # 从optimizer的参数组中直接记录下每个组的初始和最小学习率
+        self.initial_lrs = [g.get('lr', 0.0) for g in optimizer.param_groups]
+        self.min_lrs = [g.get('min_lr', 0.0) for g in optimizer.param_groups]
 
-    def get_lr(self, it):
-        # 1) linear warmup for warmup_steps steps
+    def get_progress_coeff(self, it):
+        """计算当前步数的衰减进度系数 (0到1之间)"""
+        # 1) 预热阶段
         if it < self.warmup_iters:
-            return self.init_lr * it / self.warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
-        if it > self.lr_decay_iters:
-            return self.min_lr
-        # 3) in between, use cosine decay down to min learning rate
-        decay_ratio = (it - self.warmup_iters) / (self.lr_decay_iters - self.warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-        return self.min_lr + coeff * (self.init_lr - self.min_lr)
+            return it / self.warmup_iters
+        # 2) 衰减阶段
+        decay_ratio = (it - self.warmup_iters) / (self.max_iters - self.warmup_iters)
+        decay_ratio = min(1.0, decay_ratio) # 确保不超过1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return coeff
 
     def step(self, cur_step):
-        lr = self.get_lr(cur_step)
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-        return lr
+        progress_coeff = self.get_progress_coeff(cur_step)
+        
+        # 遍历每个参数组，根据各自的初始和最小学习率，按比例更新
+        for i, param_group in enumerate(self.optimizer.param_groups):
+            initial_lr = self.initial_lrs[i]
+            min_lr = self.min_lrs[i]
+            
+            # 在预热阶段，从0线性增长到initial_lr
+            if cur_step < self.warmup_iters:
+                 param_group['lr'] = initial_lr * progress_coeff
+            # 在衰减阶段，从initial_lr余弦衰减到min_lr
+            else:
+                 param_group['lr'] = min_lr + (initial_lr - min_lr) * progress_coeff
+        
+        # 返回第一个组的学习率用于日志记录
+        return self.optimizer.param_groups[0]['lr']
 
 
 def get_half_precision_dtype():
@@ -149,31 +149,50 @@ class LLMPL(L.LightningModule):
             torch.nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 torch.nn.init.constant_(m.bias, 0)    
+
     def configure_optimizers(self):
         self.trainer.fit_loop.setup_data()
         warmup_steps = min(len(self.trainer.train_dataloader), self.args.warmup_steps)
         
-        adapter_params = [p for n, p in self.named_parameters() if 'projection' in n or 'embedding_norm' in n]
-        llm_params = [p for n, p in self.named_parameters() if 'projection' not in n and 'embedding_norm' not in n]
-        
-        # --- 核心修正: 使用“零学习率”策略以兼容DeepSpeed ---
-        initial_llm_lr = 0.0
-        if self.unfreeze_epoch == 0:
-            initial_llm_lr = self.args.init_lr / 10.0
-        
-        print(f"INFO: Initializing optimizer. Adapter LR: {self.args.init_lr}, LLM LR: {initial_llm_lr}")
-
+        # --- 新增：为Weight Decay创建更精细的参数分组 (来自上一轮的优化) ---
+        no_decay = ["bias", "LayerNorm.weight", "embedding_norm", "post_projection_norm"]
         optimizer_grouped_parameters = [
-            {"params": adapter_params, "lr": self.args.init_lr},
-            {"params": llm_params, "lr": initial_llm_lr} # 初始时LLM学习率为0
+            {
+                "params": [p for n, p in self.named_parameters() if not any(nd in n for nd in no_decay) and p.requires_grad],
+                "weight_decay": self.args.weight_decay,
+            },
+            {
+                "params": [p for n, p in self.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad],
+                "weight_decay": 0.0,
+            },
         ]
-        # --- 修正结束 ---
 
-        optimizer = optim.AdamW(optimizer_grouped_parameters, weight_decay=self.args.weight_decay)
+        # --- 核心修改：为每个参数组设置独立的 lr 和 min_lr ---
+        initial_llm_lr = 0.0
+        min_llm_lr = 0.0 # 在冻结期间，最小学习率也为0
+        
+        if self.unfreeze_epoch == 0:
+            initial_llm_lr = self.args.init_lr / 100.0 # <-- 差分比例100倍
+            min_llm_lr = self.args.min_lr / 100.0
+        
+        # 遍历所有参数组（包括有decay和无decay的），为它们设置学习率
+        for param_group in optimizer_grouped_parameters:
+            first_param_name = next(iter(param_group["params"]))._get_name() if len(param_group["params"]) > 0 else ""
+            if 'projection' in first_param_name or 'embedding_norm' in first_param_name:
+                param_group["lr"] = self.args.init_lr
+                param_group["min_lr"] = self.args.min_lr # <-- 为适配器组添加min_lr
+            else:
+                param_group["lr"] = initial_llm_lr
+                param_group["min_lr"] = min_llm_lr # <-- 为LLM组添加min_lr
+
+        print(f"INFO: Initializing optimizer. Adapter LR: {self.args.init_lr} -> {self.args.min_lr}, LLM LR: {initial_llm_lr} -> {min_llm_lr}")
+
+        optimizer = optim.AdamW(optimizer_grouped_parameters)
         
         max_iters = self.args.max_epochs * len(self.trainer.train_dataloader)
         if self.args.scheduler == 'linear_warmup_cosine_lr':
-            self.scheduler = LinearWarmupCosineLRSchedulerV2(optimizer, max_iters, self.args.min_lr, self.args.init_lr, warmup_steps, self.args.warmup_lr)
+            # 调度器现在不再需要init_lr和min_lr，因为它会从optimizer的组中读取
+            self.scheduler = LinearWarmupCosineLRSchedulerV2(optimizer, max_iters, warmup_iters=warmup_steps)
         else:
             self.scheduler = None
             
@@ -198,10 +217,22 @@ class LLMPL(L.LightningModule):
 
     def on_train_epoch_start(self):
         if self.current_epoch == self.unfreeze_epoch and self.unfreeze_epoch > 0:
-            target_llm_lr = self.args.init_lr / 10.0
-            print(f"\nEpoch {self.current_epoch}: Unfreezing LLM parameters by setting LR to {target_llm_lr}...")
-            self.trainer.optimizers[0].param_groups[1]['lr'] = target_llm_lr
-            print("INFO: LLM parameter group LR updated.")
+            target_llm_lr = self.args.init_lr / 100.0
+            target_min_llm_lr = self.args.min_lr / 100.0
+            print(f"\nEpoch {self.current_epoch}: Unfreezing LLM parameters by setting LR to {target_llm_lr} -> {target_min_llm_lr}...")
+            
+            for param_group in self.trainer.optimizers[0].param_groups:
+                first_param_name = next(iter(param_group["params"]))._get_name() if len(param_group["params"]) > 0 else ""
+                # 找到不属于适配器的组（即LLM组）
+                if 'projection' not in first_param_name and 'embedding_norm' not in first_param_name:
+                    param_group['lr'] = target_llm_lr
+                    param_group['min_lr'] = target_min_llm_lr
+
+            # 更新调度器内部记录的基准学习率
+            self.scheduler.initial_lrs = [g.get('lr', 0.0) for g in self.trainer.optimizers[0].param_groups]
+            self.scheduler.min_lrs = [g.get('min_lr', 0.0) for g in self.trainer.optimizers[0].param_groups]
+
+            print("INFO: LLM parameter group LR and Min_LR updated.")
     # def on_train_epoch_start(self):
     #     if self.current_epoch == self.unfreeze_epoch and self.delta_train:
     #         print(f"Epoch {self.current_epoch}: Unfreezing LoRA parameters for fine-tuning...")
@@ -294,11 +325,11 @@ class LLMPL(L.LightningModule):
 
         self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=False)
         self.projection = torch.nn.Sequential(
-        torch.nn.Linear(1536, 512),
-        torch.nn.LayerNorm(512), 
+        torch.nn.Linear(1536, 1024),
+        torch.nn.LayerNorm(1024), 
         torch.nn.GELU(),
-        torch.nn.Dropout(p=0.2),
-        torch.nn.Linear(512, self.hidden_size)
+        torch.nn.Dropout(p=0.3),
+        torch.nn.Linear(1024, self.hidden_size)
         )
         self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=False)
 
