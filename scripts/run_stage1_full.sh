@@ -68,7 +68,7 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --max_epochs 300 \
     --batch_size 64 \
     --eval_batch_size 20\
-    --temperature 0.1 \
+    --temperature 0.5 \
     --do_sample \
     --generate_eval_epoch 5 \
     --save_every_n_epochs 6 \
