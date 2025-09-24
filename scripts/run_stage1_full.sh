@@ -90,8 +90,8 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --warmup_steps 1000 \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\
-    --init_lr 2e-5 \
-    --min_lr 1e-6 \
+    --init_lr 5e-6 \
+    --min_lr 1e-7 \
     --gradient_clip_val 1.0 \
     --epoch_without_eval 0 \
     --attention_dropout 0.3 \
