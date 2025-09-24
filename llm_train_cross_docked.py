@@ -162,6 +162,7 @@ def main(args):
         check_val_every_n_epoch=args.check_val_every_n_epoch,
         log_every_n_steps=20,
         callbacks=callbacks,
+        num_sanity_val_steps=0,
         logger=[csv_logger, wandb_logger],
         gradient_clip_val=args.gradient_clip_val
     )
