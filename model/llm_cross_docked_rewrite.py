@@ -437,7 +437,7 @@ class LLMPL(L.LightningModule):
                 print("."*80)
 
             # --- 诊断 Part C: Logits 检查 ---
-            prompt_embeds_for_logits = prompt_embeds_after.to(torch.bfloat16)
+            prompt_embeds_for_logits = prompt_embeds_after
             outputs = self.llm_model(inputs_embeds=prompt_embeds_for_logits, attention_mask=pock_attn_mask, return_dict=True)
             self.debug_inspect_logits(logits=outputs.logits, prompt_length=prompt_embeds_for_logits.shape[1],
                                       epoch=self.current_epoch, step=self.trainer.global_step, batch_idx=batch_idx)
@@ -847,9 +847,7 @@ class LLMPL(L.LightningModule):
         bos_token_tensor = torch.tensor([[bos_token_id]] * batch_size, device=device)
         bos_embedding = self.llm_model.get_input_embeddings()(bos_token_tensor)
                 
-        # --- 3. 强制确保所有部分都是 bfloat16 再拼接 ---
-        pocket_emb_lm = pocket_emb_lm.to(torch.bfloat16)
-        bos_embedding = bos_embedding.to(torch.bfloat16)
+
         
         inputs_embeds = torch.cat([bos_embedding, pocket_emb_lm], dim=1)
         # --- [ 新增调试代码 ] ---
@@ -895,7 +893,6 @@ class LLMPL(L.LightningModule):
         input_emb = torch.cat([pocket_emb_lm, input_emb_selfies], dim=1)
 
 
-        input_emb = input_emb.to(torch.bfloat16)
 
         target_selfies = selfies_batch.input_ids.masked_fill(~selfies_batch.attention_mask.bool(), -100)
         batch_size, seq_len = pocket_emb_lm.shape[:2]
