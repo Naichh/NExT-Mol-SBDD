@@ -67,7 +67,7 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --mode 'train' \
     --max_epochs 300 \
     --batch_size 64 \
-    --eval_batch_size 20\
+    --eval_batch_size 32\
     --temperature 0.5 \
     --do_sample \
     --generate_eval_epoch 5 \
@@ -77,7 +77,7 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --split_file "$SPLIT_FILE" \
     --num_output_2d 100 \
     --num_output_3d 5 \
-    --num_beams 1 \
+    --num_beams 200 \
     --num_workers 4 \
     --eval_2d_every_n_epochs 3 \
     --eval_3d_every_n_epochs 200 \
