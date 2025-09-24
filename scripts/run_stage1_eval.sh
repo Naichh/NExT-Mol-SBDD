@@ -58,7 +58,7 @@ torchrun --nproc_per_node=1 --master_port=29817 llm_train_cross_docked.py \
     --llm_model "$LLM_MODEL_ID" \
     --batch_size 1 \
     --eval_batch_size 1 \
-    --num_workers 8 \
+    --num_workers 10 \
     --max_sf_tokens 128 \
     --max_pocket_tokens 128 \
     --llm_tune 'full' \

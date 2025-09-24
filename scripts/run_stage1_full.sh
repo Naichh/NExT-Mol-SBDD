@@ -10,7 +10,7 @@ export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=8000
 export NCCL_SOCKET_IFNAME=ib1
 export NCCL_IB_HCA=ib1
 export PL_TORCH_DISTRIBUTED_BACKEND_TIMEOUT=3600
-
+export TOKENIZERS_PARALLELISM=false
 # --- 1. 工作目录与环境配置 ---
 PROJECT_ROOT="/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol"
 cd $PROJECT_ROOT
@@ -68,7 +68,7 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --max_epochs 300 \
     --batch_size 64 \
     --eval_batch_size 32\
-    --temperature 0.2 \
+    --temperature 0.1 \
     --do_sample \
     --generate_eval_epoch 5 \
     --save_every_n_epochs 6 \
@@ -78,7 +78,7 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --num_output_2d 100 \
     --num_output_3d 5 \
     --num_beams 1 \
-    --num_workers 6 \
+    --num_workers 0 \
     --eval_2d_every_n_epochs 3 \
     --eval_3d_every_n_epochs 200 \
     --max_sf_tokens 128 \
@@ -87,10 +87,10 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --llm_tune 'full' \
     --unfreeze_epoch 0 \
     --accelerator 'gpu' \
-    --warmup_steps 500 \
+    --warmup_steps 1000 \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\
-    --init_lr 1e-5 \
+    --init_lr 2e-5 \
     --min_lr 1e-6 \
     --gradient_clip_val 1.0 \
     --epoch_without_eval 0 \

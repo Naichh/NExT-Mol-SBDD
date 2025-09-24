@@ -290,11 +290,11 @@ class LLMPL(L.LightningModule):
 
         self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=False)
         self.projection = torch.nn.Sequential(
-        torch.nn.Linear(1536, 1024),
-        torch.nn.LayerNorm(1024), 
+        torch.nn.Linear(1536, 256),
+        torch.nn.LayerNorm(256), 
         torch.nn.GELU(),
-        torch.nn.Dropout(p=0.3),
-        torch.nn.Linear(1024, self.hidden_size)
+        torch.nn.Dropout(p=0.4),
+        torch.nn.Linear(256, self.hidden_size)
         )
         self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=False)
 
@@ -367,10 +367,13 @@ class LLMPL(L.LightningModule):
     # In LLMPL class
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        train_epoch_condition = (self.current_epoch + 1) % self.args.generate_eval_epoch  == 0 and self.args.mode == 'train'
-        eval_condition = self.args.mode in {'eval', 'eval_conf'}
+
+
+
 
         selfies_batch, selfies2_batch, pockets_emb, pock_attn_mask, ground_truth_mols, pocket_paths = batch
+        
+        
 
         # --- 1. 深入的诊断逻辑 (仅在第一个batch执行) ---
         if self.trainer.is_global_zero and batch_idx == 0:
@@ -434,9 +437,7 @@ class LLMPL(L.LightningModule):
         loss = (lm_loss0 + lm_loss1) / 2
         self.log('val_loss', loss, sync_dist=True, batch_size=pockets_emb.shape[0])
 
-        if not train_epoch_condition and not eval_condition:
-            return
-        current_epoch = self.current_epoch
+
         num_output_for_this_epoch = 0 # <-- ADD THIS INITIALIZATION LINE
 
         is_2d_eval_epoch = (self.current_epoch + 1) % self.args.eval_2d_every_n_epochs == 0
@@ -540,23 +541,11 @@ class LLMPL(L.LightningModule):
                 print(f"!!! ERROR during processing: {e}")
         print("------------------------------------------------------\n")
         # ======================= [ 调试代码块结束 ] =======================
+
         print(f"\n--- DEBUG: Entering on_validation_epoch_end for Epoch {self.current_epoch} ---")
-        train_epoch_condition = (self.current_epoch + 1) % self.args.generate_eval_epoch == 0 and self.args.mode == 'train'
-        eval_condition = self.args.mode in {'eval'}
-        if  not eval_condition and self.current_epoch< self.args.epoch_without_eval:
-            print(f"--- DEBUG: Skipping evaluation because current_epoch ({self.current_epoch}) < epoch_without_eval ({self.args.epoch_without_eval}). ---\n")
-
-            return
-
-        if not train_epoch_condition and not eval_condition:
-            print(f"--- DEBUG: Skipping evaluation due to generate_eval_epoch condition. ---\n")
-            
-            return
-        print("--- DEBUG: Passed all initial checks. Starting generation and evaluation. ---")
 
         if not self.trainer.is_global_zero:
             print("--- DEBUG: Not on global rank zero, returning. ---")
-
             return
         run_2d_eval = (self.current_epoch + 1) % self.args.eval_2d_every_n_epochs == 0
         if run_2d_eval:
