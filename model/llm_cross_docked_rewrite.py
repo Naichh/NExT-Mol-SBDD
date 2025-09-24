@@ -368,12 +368,28 @@ class LLMPL(L.LightningModule):
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
 
-
-
-
+        if hasattr(self, 'global_rank'):
+            print(f">>> [DEBUG] Rank {self.global_rank}: Entering validation_step for batch_idx {batch_idx}.")
+        else:
+            print(f">>> [DEBUG] Entering validation_step for batch_idx {batch_idx}.")
         selfies_batch, selfies2_batch, pockets_emb, pock_attn_mask, ground_truth_mols, pocket_paths = batch
+
+        # 2. 打印出我们将要检查的张量的大小
+        current_batch_size = pockets_emb.shape[0]
+        print(f">>> [DEBUG] Rank {self.global_rank}: Current batch size is {current_batch_size}.")
+
+        # 3. 执行我们的核心检查，并在进入if语句时打印信息
+        if current_batch_size == 0:
+            print(f"!!! [DEBUG] Rank {self.global_rank}: EMPTY BATCH DETECTED! Skipping this step. !!!")
+            return
+
+        # 4. 如果没有跳过，也打印一条信息，确认代码继续执行
+        print(f">>> [DEBUG] Rank {self.global_rank}: Batch is valid, proceeding with validation logic.")
+        # ===================== END: 强力调试代码 =====================
+
+
         
-        
+     
 
         # --- 1. 深入的诊断逻辑 (仅在第一个batch执行) ---
         if self.trainer.is_global_zero and batch_idx == 0:

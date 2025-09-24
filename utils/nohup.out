@@ -806,3 +806,43 @@ SBDD Stage 1 运行执行完毕。
 错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_101251/sbdd_full-finetune_20250924_101251/training_err.log
 模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250924_101251
 SBDD Stage 1 运行执行完毕。
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250919_163811/last.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_110043/sbdd_full-finetune_20250924_110043/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_110043/sbdd_full-finetune_20250924_110043/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250924_110043
+SBDD Stage 1 运行执行完毕。
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250919_163811/last.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_111212/sbdd_full-finetune_20250924_111212/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_111212/sbdd_full-finetune_20250924_111212/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250924_111212
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250919_163811/last.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_111411/sbdd_full-finetune_20250924_111411/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_111411/sbdd_full-finetune_20250924_111411/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250924_111411
+SBDD Stage 1 运行执行完毕。
+SBDD Stage 1 运行执行完毕。
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250919_163811/last.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_111746/sbdd_full-finetune_20250924_111746/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_111746/sbdd_full-finetune_20250924_111746/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250924_111746
+SBDD Stage 1 运行执行完毕。
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250919_163811/last.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_112652/sbdd_full-finetune_20250924_112652/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/training/stage1/20250924_112652/sbdd_full-finetune_20250924_112652/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250924_112652
+SBDD Stage 1 运行执行完毕。
