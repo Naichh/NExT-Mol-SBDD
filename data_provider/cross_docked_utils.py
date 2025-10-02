@@ -44,7 +44,7 @@ class PocketLigandPairDataset(Dataset):
         self.index_path = os.path.join(self.raw_path, 'index.pkl')
         self.rand_smiles = rand_smiles
         self.addHs = addHs
-        
+
         # <<< 新增：将缓存保存为类属性 >>>
         self.data_cache = data_cache
 
@@ -77,15 +77,15 @@ class PocketLigandPairDataset(Dataset):
             pocket_path = os.path.join(self.raw_path, pocket_fn)
             ligand_path = os.path.join(self.raw_path, ligand_fn)
             pt_embed_path = pocket_path.replace('.pdb', '.pt')
-            
-            embedding = torch.load(pt_embed_path, map_location='cpu')
+
+            embedding = torch.load(pt_embed_path, map_location='cpu',weights_only=True)
 
             mol = Chem.SDMolSupplier(ligand_path, removeHs=False, sanitize=True)[0]
             if mol is None:
                 return None
-            
+
             smiles = Chem.MolToSmiles(mol)
-            
+
             # 假设您的随机化和selfies转换函数在这里
             smiles1 = restricted_random_smiles(smiles, self.addHs)
             smiles2 = restricted_random_smiles(smiles, self.addHs)
@@ -101,7 +101,7 @@ class PocketLigandPairDataset(Dataset):
                 'rmsd': torch.tensor(rmsd, dtype=torch.float),
                 'rdmol': mol
             }
-        
+
         except FileNotFoundError:
             return None # 优雅地处理文件缺失
         except Exception as e:

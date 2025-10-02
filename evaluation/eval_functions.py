@@ -75,7 +75,7 @@ def _vina_docking_worker(mol, receptor_pdbqt_path, exhaustiveness):
                         value = nested_val
                 elif isinstance(result, (float, int)):
                     value = result
-                
+
                 if value is not None:
                     score = float(value)
                 return score
@@ -88,7 +88,7 @@ def _vina_docking_worker(mol, receptor_pdbqt_path, exhaustiveness):
             energies_dock = v.energies(n_poses=1)
             dock_res = get_score_safely(energies_dock)
             t_dock_done = time.time()
-        
+
         # 仅在成功时打印性能日志
         print(
             f"\n--- [PROFILING] Mol SMILES: {Chem.MolToSmiles(mol)}\n"
@@ -217,8 +217,8 @@ def run_full_evaluation(grouped_mols):
         print(f"\n--- [Stage 3/4] Starting robust parallel docking for {len(gen_docking_tasks)} generated molecules... ---")
 
 
-        INDIVIDUAL_TASK_TIMEOUT = 300 
-        
+        INDIVIDUAL_TASK_TIMEOUT = 300
+
         raw_docking_results = []
 
 
@@ -275,7 +275,7 @@ def run_full_evaluation(grouped_mols):
     def print_diagnostic_summary(score_list, score_name, total_tasks):
         successful_count = len(score_list)
         failed_count = total_tasks - successful_count
-        
+
         print("\n" + "="*60)
         print(f"--- [ Diagnostic Summary for: {score_name} ] ---")
         print(f"  - Total Tasks Attempted: {total_tasks}")
@@ -284,16 +284,16 @@ def run_full_evaluation(grouped_mols):
 
         if successful_count > 0:
             scores_np = np.array(score_list)
-            
+
             # 计算正、负、零分数的统计
             negative_count = np.sum(scores_np < 0)
             positive_count = np.sum(scores_np > 0)
             zero_count = np.sum(scores_np == 0)
-            
+
             print(f"  - Favorable Scores (< 0): {negative_count} ({negative_count/successful_count:.2%})")
             print(f"  - Unfavorable Scores (> 0): {positive_count} ({positive_count/successful_count:.2%})")
             print(f"  - Zero Scores (== 0)    : {zero_count} ({zero_count/successful_count:.2%})")
-            
+
             # 打印最好和最差的分数
             print(f"  - Best Score (Min)       : {np.min(scores_np):.4f}")
             print(f"  - Worst Score (Max)      : {np.max(scores_np):.4f}")
@@ -323,11 +323,11 @@ def run_full_evaluation(grouped_mols):
         'Diversity Avg': np.mean(per_pocket_diversities) if per_pocket_diversities else 0,
         'Diversity Med': np.median(per_pocket_diversities) if per_pocket_diversities else 0,
         'Reference Vina Score Avg': np.mean(ref_vina_scores) if ref_vina_scores else 0,
-        'Reference Vina Score Med': np.median(ref_vina_scores) if ref_vina_scores else 0,        
+        'Reference Vina Score Med': np.median(ref_vina_scores) if ref_vina_scores else 0,
         'Reference Vina Min Avg': np.mean(ref_vina_mins) if ref_vina_mins else 0,
         'Reference Vina Min Med': np.median(ref_vina_mins) if ref_vina_mins else 0,
         'Reference Vina Dock Avg': np.mean(ref_vina_docks) if ref_vina_docks else 0,
-        'Reference Vina Dock Med': np.median(ref_vina_docks) if ref_vina_docks else 0,        
+        'Reference Vina Dock Med': np.median(ref_vina_docks) if ref_vina_docks else 0,
         'Reference QED Avg': np.mean(ref_qed_scores) if ref_qed_scores else 0,
         'Reference QED Med': np.median(ref_qed_scores) if ref_qed_scores else 0,
         'Reference SA Avg': np.mean(ref_sa_scores) if ref_sa_scores else 0,
@@ -384,7 +384,6 @@ def SBDD_validation(generated_mols, ground_truth_mols):
         fp_gt = AllChem.GetMorganFingerprintAsBitVect(mol_gt, radius, nBits=nBits)
         return DataStructs.TanimotoSimilarity(fp_gen, fp_gt)
 
-    # --- 指标计算 ---
     scores = {
         'exact_match': [],
         'levenshtein': [],
@@ -393,7 +392,6 @@ def SBDD_validation(generated_mols, ground_truth_mols):
         'morgan_fts': []
     }
 
-    # 确保两个列表长度一致
     num_pairs = min(len(generated_mols), len(ground_truth_mols))
     for i in range(num_pairs):
         mol_gen = generated_mols[i]
@@ -405,13 +403,10 @@ def SBDD_validation(generated_mols, ground_truth_mols):
         scores['rdk_fts'].append(get_rdk_fts(mol_gen, mol_gt))
         scores['morgan_fts'].append(get_morgan_fts(mol_gen, mol_gt))
 
-    # --- 计算平均值 ---
     if num_pairs == 0:
-        # 如果没有有效的分子对，返回0
         return {key: 0.0 for key in scores}
 
     avg_scores = {
-        # Exact Match 计算的是百分比
         'SBDD/ExactMatch': np.mean(scores['exact_match']),
         'SBDD/Levenshtein': np.mean(scores['levenshtein']),
         'SBDD/MACCS_FTS': np.mean(scores['maccs_fts']),
@@ -647,53 +642,90 @@ def get_3D_edm_metric_batch(predict_mols, train_mols=None, dataset_name='QM9'):
     rdkit_dict = eval_rdmol(rd_mols, train_smiles)
     output_dict.update(rdkit_dict)
     return output_dict
+from multiprocessing import Pool
+
+# def get_moses_metrics(test_mols, n_jobs=1, device='cpu', batch_size=2000, ptest_pool=None, cache_path=None):
+#     n_jobs = 1
+#     # compute intermediate statistics for test rdmols
+#     if cache_path is not None and os.path.exists(cache_path):
+#         with open(cache_path, 'rb') as f:
+#             ptest = pickle.load(f)
+#     else:
+#         ptest = compute_intermediate_statistics(test_mols, n_jobs=n_jobs, device=device,
+#                                                 batch_size=batch_size, pool=ptest_pool)
+#         if cache_path is not None:
+#             with open(cache_path, 'wb') as f:
+#                 pickle.dump(ptest, f)
+
+#     def moses_metrics(gen_mols, pool=None):
+#         metrics = {}
+#         if pool is None:
+#             if n_jobs != 1:
+#                 pool = Pool(n_jobs)
+#                 close_pool = True
+#             else:
+#                 pool = 1
+#                 close_pool = False
+#         kwargs = {'n_jobs': pool, 'device': device, 'batch_size': batch_size}
+#         kwargs_fcd = {'n_jobs': n_jobs, 'device': device, 'batch_size': batch_size}
+#         gen_smiles = mapper(pool)(get_smiles, gen_mols)
+#         gen_smiles = list(set(gen_smiles) - {None})
+#         re_mols = mapper(pool)(reconstruct_mol, gen_smiles)
+#         metrics['FCD'] = FCDMetric(**kwargs_fcd)(gen=gen_smiles, pref=ptest['FCD'])
+#         metrics['SNN'] = SNNMetric(**kwargs)(gen=re_mols, pref=ptest['SNN'])
+#         metrics['Frag'] = FragMetric(**kwargs)(gen=re_mols, pref=ptest['Frag'])
+#         metrics['Scaf'] = ScafMetric(**kwargs)(gen=re_mols, pref=ptest['Scaf'])
+#         metrics['IntDiv'] = internal_diversity(re_mols, pool, device=device)
+#         metrics['Filters'] = fraction_passes_filters(re_mols, pool)
+
+#         # drug properties
+#         metrics['QED'] = MeanProperty(re_mols, QED.qed, n_jobs)
+#         metrics['SA'] = MeanProperty(re_mols, sascorer.calculateScore, n_jobs)
+#         metrics['logP'] = MeanProperty(re_mols, Crippen.MolLogP, n_jobs)
+#         metrics['weight'] = MeanProperty(re_mols, Descriptors.ExactMolWt, n_jobs)
+
+#         if close_pool:
+#             pool.close()
+#             pool.join()
+#         return metrics
+
+#     return moses_metrics
 
 def get_moses_metrics(test_mols, n_jobs=1, device='cpu', batch_size=2000, ptest_pool=None, cache_path=None):
-    # compute intermediate statistics for test rdmols
+    n_jobs = 1
     if cache_path is not None and os.path.exists(cache_path):
         with open(cache_path, 'rb') as f:
             ptest = pickle.load(f)
     else:
-        ptest = compute_intermediate_statistics(test_mols, n_jobs=n_jobs, device=device,
-                                                batch_size=batch_size, pool=ptest_pool)
+        ptest = compute_intermediate_statistics(test_mols, n_jobs=n_jobs, device=device, batch_size=batch_size)
         if cache_path is not None:
             with open(cache_path, 'wb') as f:
                 pickle.dump(ptest, f)
 
-    def moses_metrics(gen_mols, pool=None):
+    def moses_metrics_single_process(gen_mols):
         metrics = {}
-        if pool is None:
-            if n_jobs != 1:
-                pool = Pool(n_jobs)
-                close_pool = True
-            else:
-                pool = 1
-                close_pool = False
-        kwargs = {'n_jobs': pool, 'device': device, 'batch_size': batch_size}
-        kwargs_fcd = {'n_jobs': n_jobs, 'device': device, 'batch_size': batch_size}
-        gen_smiles = mapper(pool)(get_smiles, gen_mols)
+        gen_smiles = [get_smiles(m) for m in gen_mols]
         gen_smiles = list(set(gen_smiles) - {None})
-        re_mols = mapper(pool)(reconstruct_mol, gen_smiles)
-        metrics['FCD'] = FCDMetric(**kwargs_fcd)(gen=gen_smiles, pref=ptest['FCD'])
+        re_mols = [reconstruct_mol(s) for s in gen_smiles]
+        kwargs = {'n_jobs': n_jobs, 'device': device, 'batch_size': batch_size}
+        metrics['FCD'] = FCDMetric(**kwargs)(gen=gen_smiles, pref=ptest['FCD'])
         metrics['SNN'] = SNNMetric(**kwargs)(gen=re_mols, pref=ptest['SNN'])
         metrics['Frag'] = FragMetric(**kwargs)(gen=re_mols, pref=ptest['Frag'])
         metrics['Scaf'] = ScafMetric(**kwargs)(gen=re_mols, pref=ptest['Scaf'])
-        metrics['IntDiv'] = internal_diversity(re_mols, pool, device=device)
-        metrics['Filters'] = fraction_passes_filters(re_mols, pool)
+
+        # 将 n_jobs=1 传递给其他工具函数
+        metrics['IntDiv'] = internal_diversity(re_mols, n_jobs=n_jobs, device=device)
+        metrics['Filters'] = fraction_passes_filters(re_mols, n_jobs=n_jobs)
 
         # drug properties
-        metrics['QED'] = MeanProperty(re_mols, QED.qed, n_jobs)
-        metrics['SA'] = MeanProperty(re_mols, sascorer.calculateScore, n_jobs)
-        metrics['logP'] = MeanProperty(re_mols, Crippen.MolLogP, n_jobs)
-        metrics['weight'] = MeanProperty(re_mols, Descriptors.ExactMolWt, n_jobs)
+        metrics['QED'] = MeanProperty(re_mols, QED.qed, n_jobs=n_jobs)
+        metrics['SA'] = MeanProperty(re_mols, sascorer.calculateScore, n_jobs=n_jobs)
+        metrics['logP'] = MeanProperty(re_mols, Crippen.MolLogP, n_jobs=n_jobs)
+        metrics['weight'] = MeanProperty(re_mols, Descriptors.ExactMolWt, n_jobs=n_jobs)
 
-        if close_pool:
-            pool.close()
-            pool.join()
         return metrics
 
-    return moses_metrics
-
+    return moses_metrics_single_process
 
 def get_sub_geometry_metric(test_mols, dataset_info, root_path):
     tar_geo_stat = load_target_geometry(test_mols, dataset_info, root_path)

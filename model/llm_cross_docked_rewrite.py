@@ -24,28 +24,42 @@ from torch.nn import CrossEntropyLoss
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from collections import defaultdict # Make sure this is imported
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+import torch
+import torch.nn as nn
+from evaluation.eval_functions import run_full_evaluation
 
-from evaluation.eval_functions import run_full_evaluation 
-
-
-# class ResidualAdapter(torch.nn.Module):
-#     def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.1):
+# class ResidualAdapter(nn.Module):
+#     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, dropout: float = 0.1):
 #         super().__init__()
-#         self.block = torch.nn.Sequential(
-#             torch.nn.Linear(input_dim, hidden_dim),
-#             torch.nn.LayerNorm(hidden_dim),
-#             torch.nn.GELU(),
-#             torch.nn.Dropout(p=dropout),
-#             torch.nn.Linear(hidden_dim, output_dim)
-#         )
-#         # 这个捷径层用于匹配输入和输出的维度
-#         self.shortcut = torch.nn.Linear(input_dim, output_dim) if input_dim != output_dim else torch.nn.Identity()
+#         #1536 1024 2048
+#         self.block = nn.Sequential(
+#             nn.Linear(input_dim, hidden_dim),
+#             nn.GELU(),
 
-#     def forward(self, x):
+#             nn.Linear(hidden_dim, hidden_dim),
+#             nn.GELU(),
+
+
+#             nn.Linear(hidden_dim, output_dim)
+#         )
+#         if input_dim != output_dim:
+#             self.shortcut = nn.Linear(input_dim, output_dim)
+#         else:
+#             self.shortcut = nn.Identity()
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
 #         # H(x) = F(x) + x
 #         return self.block(x) + self.shortcut(x)
-    
-    
+
+# def print_grad_hook(module, grad_input, grad_output):
+#     """A simple hook to print the norm of the output gradient."""
+#     if grad_output[0] is not None:
+#         grad_norm = torch.linalg.norm(grad_output[0])
+#         print(f"\n[DEBUG GRADIENT] Grad norm for {module.__class__.__name__}: {grad_norm:.4f}\n")
+
+
+
 def worker_generate_3d(data_pair):
 
     selfies_string, pocket_path = data_pair
@@ -54,54 +68,15 @@ def worker_generate_3d(data_pair):
         if not smiles:
             return None, None, selfies_string
 
-        # 调用静态方法来执行核心的3D生成逻辑
         mol_3d = LLMPL.generate_3d_mol(smiles,'fast')
 
         if mol_3d is None:
             return None, None, selfies_string
-        
+
         return mol_3d, pocket_path, selfies_string
-        
+
     except Exception:
         return None, None, selfies_string
-class LinearWarmupCosineLRSchedulerV2:
-    def __init__(
-        self,
-        optimizer,
-        max_iters,
-        min_lr,
-        init_lr,
-        warmup_iters=0,
-        warmup_start_lr=-1,
-        **kwargs
-    ):
-        self.optimizer = optimizer
-        self.max_iters = max_iters
-        self.min_lr = min_lr
-        self.init_lr = init_lr
-        self.warmup_iters = warmup_iters
-        self.warmup_start_lr = warmup_start_lr if warmup_start_lr >= 0 else init_lr
-        self.lr_decay_iters = max_iters
-
-    def get_lr(self, it):
-        # 1) linear warmup
-        if it < self.warmup_iters:
-            return self.init_lr * it / self.warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
-        if it > self.lr_decay_iters:
-            return self.min_lr
-        # 3) in between, use cosine decay
-        decay_ratio = (it - self.warmup_iters) / (self.lr_decay_iters - self.warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return self.min_lr + coeff * (self.init_lr - self.min_lr)
-
-    def step(self, cur_step):
-        lr = self.get_lr(cur_step)
-        # 将计算出的学习率应用到所有参数组
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-        return lr
 
 
 def get_half_precision_dtype():
@@ -149,54 +124,137 @@ class LLMPL(L.LightningModule):
         if isinstance(m, torch.nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
-                torch.nn.init.constant_(m.bias, 0)    
+                torch.nn.init.constant_(m.bias, 0)
 
-    def configure_optimizers(self):
-        self.trainer.fit_loop.setup_data()
-        warmup_steps = min(len(self.trainer.train_dataloader), self.args.warmup_steps)
-        
-        # --- 核心修改：不再分组，所有可训练参数使用统一的学习率 ---
-        print(f"INFO: Initializing optimizer with a single learning rate for all trainable parameters.")
-        
-        # self.parameters() 会自动返回所有 requires_grad=True 的参数
-        optimizer = optim.AdamW(
-            self.parameters(), 
-            lr=self.args.init_lr, 
-            weight_decay=self.args.weight_decay
-        )
-        # --- 修改结束 ---
-        
-        max_iters = self.args.max_epochs * len(self.trainer.train_dataloader)
-        if self.args.scheduler == 'linear_warmup_cosine_lr':
-            # 调度器现在也只基于全局的学习率工作
-            self.scheduler = LinearWarmupCosineLRSchedulerV2(
-                optimizer, 
-                max_iters, 
-                min_lr=self.args.min_lr,
-                init_lr=self.args.init_lr, 
-                warmup_iters=warmup_steps
-            )
-        else:
-            self.scheduler = None
-            
-        return optimizer
+    def on_fit_start(self):
+            if self.unfreeze_epoch > 0 and self.args.llm_tune in ['lora', 'full']:
+                if self.trainer.is_global_zero:
+                    print("\n" + "="*80)
+                    print(f"INFO (on_fit_start): Two-stage training initiated for '{self.args.llm_tune}' mode.")
+                    print("STAGE 1: Training Adapter ONLY.")
+                    print("="*80 + "\n")
+
+                if self.args.llm_tune == 'lora':
+                    for name, param in self.llm_model.named_parameters():
+                        if 'lora' in name:
+                            param.requires_grad = False
+                elif self.args.llm_tune == 'full':
+                    for param in self.llm_model.parameters():
+                        param.requires_grad = False
+
+                if self.trainer.is_global_zero:
+                    print("Trainable parameters for STAGE 1 (set in on_fit_start):")
+                    trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+                    total_params = sum(p.numel() for p in self.parameters())
+                    print(f"Total trainable parameters: {trainable_params / 1e6:.2f}M")
+                    print(f"Percentage of trainable parameters: {100 * trainable_params / total_params:.4f}%")
+                    proj_params = sum(p.numel() for p in self.projection.parameters() if p.requires_grad)
+                    print(f"Projection adapter has {proj_params/1e6:.2f}M trainable parameters.")
+
+
+    def on_train_batch_start(self, batch, batch_idx):
+        if self.is_in_llm_warmup:
+            optimizer = self.trainer.optimizers[0]
+
+
+            start_lr = self.llm_target_lr * 0.01
+            current_step = self.llm_warmup_step_count
+            total_steps = self.llm_warmup_steps
+
+            lr_ratio = current_step / total_steps
+            current_lr = start_lr + (self.llm_target_lr - start_lr) * lr_ratio
+
+
+            optimizer.param_groups[0]['lr'] = current_lr
+
+            self.llm_warmup_step_count += 1
+
+            if self.llm_warmup_step_count >= self.llm_warmup_steps:
+                self.is_in_llm_warmup = False
+                optimizer.param_groups[0]['lr'] = self.llm_target_lr
+                print("\n" + "="*80)
+                print("INFO: LLM re-warmup finished. Handing LR control back to the main scheduler.")
+                print(f"Final LLM LR set to: {optimizer.param_groups[0]['lr']}")
+                print("="*80 + "\n")
+
+
+
+    def on_train_epoch_start(self):
+
+        if self.unfreeze_epoch <= 0 or self.args.llm_tune not in ['lora', 'full']:
+            return
+
+        if self.current_epoch == self.unfreeze_epoch:
+            if self.trainer.is_global_zero:
+                print("\n" + "="*80)
+                print(f"INFO (on_train_epoch_start): Reached Epoch {self.current_epoch}. Transitioning to STAGE 2 for '{self.args.llm_tune}' mode.")
+                print("="*80 + "\n")
+            if not self.is_in_llm_warmup and self.llm_warmup_step_count == 0:
+                print("\n" + "="*80)
+                print(f"INFO: Epoch {self.current_epoch}. Unfreezing LLM and INITIATING a {self.llm_warmup_steps}-step re-warmup for LLM parameters.")
+                print(f"Target LLM LR after warmup: {self.llm_target_lr}")
+                print("="*80 + "\n")
+                self.is_in_llm_warmup = True
+            if self.args.llm_tune == 'lora':
+                for name, param in self.llm_model.named_parameters():
+                    if 'lora' in name:
+                        param.requires_grad = True
+            elif self.args.llm_tune == 'full':
+                for param in self.llm_model.parameters():
+                    param.requires_grad = True
+
+            if self.args.tune_embedding:
+                print("Unfreezing embed_tokens for STAGE 2...")
+                set_embed_tokens_trainable(self.llm_model)
+
+            if self.args.decay_projection_lr:
+                print(f"Apply decay_projection_lr ")
+                if not hasattr(self, 'adapter_lr_adjusted'):
+                    # Get the current optimizer
+                    optimizer = self.trainer.optimizers[0]
+
+                    # The second parameter group (index 1) is our adapter_params
+                    # We assume the first group (index 0) is llm_params
+                    if len(optimizer.param_groups) > 1:
+                        # Calculate the new, lower learning rate for the adapter
+                        original_adapter_lr = optimizer.param_groups[1]['lr']
+                        new_adapter_lr = original_adapter_lr / 10.0
+
+                        # Directly set the new learning rate
+                        optimizer.param_groups[1]['lr'] = new_adapter_lr
+
+                        if self.trainer.is_global_zero:
+                            print("\n" + "!"*80)
+                            print(f"STRATEGY: Dynamically reducing Adapter learning rate for STAGE 2.")
+                            print(f"--> Original Adapter LR: {original_adapter_lr}")
+                            print(f"--> New Adapter LR: {new_adapter_lr}")
+                            print("!"*80 + "\n")
+
+                    # Set the flag so this block doesn't run again
+                    self.adapter_lr_adjusted = True
+            if self.trainer.is_global_zero:
+                print("Trainable parameters for STAGE 2 (after unfreezing):")
+                trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+                total_params = sum(p.numel() for p in self.parameters())
+                print(f"Total trainable parameters: {trainable_params / 1e6:.2f}M")
+                print(f"Percentage of trainable parameters: {100 * trainable_params / total_params:.4f}%")
+
     @classmethod
     def init_tokenizer(cls, args):
         tokenizer = AutoTokenizer.from_pretrained(
             args.llm_model,
-            padding_side='left'  # <-- 核心修改：明确指定在左侧填充
+            padding_side='left'
         )
-        
-        # 关键：如果模型本身没有pad_token，必须在这里提前设置好
-        # 因为AutoTokenizer在初始化时如果找不到pad_token，可能会报错或行为不一致
+
         if tokenizer.pad_token is None:
-            # LLaMA等模型通常没有默认的pad_token，一个安全常见的做法是将其指向eos_token
             tokenizer.pad_token = tokenizer.eos_token
             print("Warning: pad_token is not set. Setting it to eos_token.")
 
         tokenizer.add_bos_token = True
         tokenizer.add_eos_token = True
         return tokenizer
+
+
 
     # def on_train_epoch_start(self):
     #     if self.current_epoch == self.unfreeze_epoch and self.delta_train:
@@ -205,8 +263,8 @@ class LLMPL(L.LightningModule):
     #         for name, param in self.llm_model.named_parameters():
     #             if "lora" in name:
     #                 param.requires_grad = True
-    #         self.llm_model.print_trainable_parameters()    
-    
+    #         self.llm_model.print_trainable_parameters()
+
     @classmethod
     def init_llm(cls, args):
         config = LlamaConfig.from_pretrained(args.llm_model)
@@ -234,8 +292,8 @@ class LLMPL(L.LightningModule):
                                      lora_dropout=args.lora_dropout,
                                      target_modules=["q_proj", "v_proj"])
             llm_model = get_peft_model(llm_model, lora_config)
-            if args.tune_embedding:
-                set_embed_tokens_trainable(llm_model)
+            # if args.tune_embedding:
+            #     set_embed_tokens_trainable(llm_model)
             llm_model.print_trainable_parameters()
         elif args.llm_tune == 'mid_lora':
             lora_config = LoraConfig(r=args.lora_r,
@@ -269,14 +327,18 @@ class LLMPL(L.LightningModule):
         self.max_sf_tokens = max_sf_tokens
         self.max_pocket_tokens = max_pocket_tokens
         self.num_beams=args.num_beams
-
+        self.is_in_llm_warmup = False
+        self.llm_warmup_steps = args.llm_warmup_steps
+        self.llm_warmup_step_count = 0
+        self.llm_target_lr = args.llm_target_lr
+        self.adapter_lr_adjusted = False
         ## init llm
         self.llm_model = self.init_llm(args)
         if tokenizer is None:
             self.tokenizer = self.init_tokenizer(args)
         else:
             self.tokenizer = tokenizer
-        
+
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             print("Warning: pad_token is not set. Setting it to eos_token.")
@@ -287,61 +349,171 @@ class LLMPL(L.LightningModule):
         self.unfreeze_epoch = args.unfreeze_epoch
         self.resize_token_embeddings(self.tokenizer)
         self.hidden_size = self.llm_model.config.hidden_size
+        print(f"The model's hidden size is: {self.hidden_size}")
 
-        self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=False)
+        self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=True)
         self.projection = torch.nn.Sequential(
-        torch.nn.Linear(1536, 256),
-        torch.nn.LayerNorm(256), 
+        torch.nn.Linear(1536, 1024),
         torch.nn.GELU(),
-        torch.nn.Dropout(p=0.4),
-        torch.nn.Linear(256, self.hidden_size)
+        torch.nn.Linear(1024, self.hidden_size)
         )
-        self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=False)
+        self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=True)
 
                # --- 应用权重初始化 ---
         print("INFO: Applying Xavier uniform initialization to the projection adapter.")
         self.projection.apply(self._init_weights)
-        # TODO: add pockets embeddings related code
-        # self.projection = torch.nn.Sequential(
-        #         torch.nn.Linear(1536, self.hidden_size * 2),
-        #         torch.nn.GELU(), 
-        #         torch.nn.Dropout(0.3), 
-        #         torch.nn.Linear(self.hidden_size * 2, self.llm_model.config.hidden_size)
-        #     )
 
-
+        # The last layer of your projection Sequential block is at index -1.
+        # This will now print the gradient norm for this layer on every backward pass.
+        # self.projection[-1].register_full_backward_hook(print_grad_hook)
         self.property_distribution = property_distribution
-        if self.delta_train:
-            print("INFO: Staged training enabled. Freezing LoRA parameters initially.")
-            for name, param in self.llm_model.named_parameters():
-                if 'lora' in name:
-                    param.requires_grad = False
+
+
+        # if self.delta_train:
+        #     print("INFO: Staged training enabled. Freezing LoRA parameters initially.")
+        #     for name, param in self.llm_model.named_parameters():
+        #         if 'lora' in name:
+        #             param.requires_grad = False
 
 
         self.save_hyperparameters(args)
 
-    # def training_step(self, batch, batch_idx):
-    #     if self.scheduler:
-    #         self.scheduler.step(self.trainer.global_step)
-        
-    #     selfies_batch,selfies2_batch, pockets_emb, pock_attn_mask,_,_ = batch
-    #     lm_loss0 = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
-    #     lm_loss1 = self.forward(selfies2_batch, pockets_emb, pock_attn_mask)
-    #     lm_loss = (lm_loss0 + lm_loss1)/2
-    #     loss = lm_loss
-    #     batch_size = selfies_batch.input_ids.shape[0]
 
-        # self.log('lr', self.trainer.optimizers[0].param_groups[0]['lr'], sync_dist=True, batch_size=batch_size)
-        # self.log('train_loss', loss, sync_dist=True, batch_size=batch_size)
+    def setup(self, stage=None):
+        """
+        这个方法在数据加载器准备好后、训练开始前被调用一次。
+        我们在这里计算所有依赖于数据长度的超参数。
+        """
+        if stage == 'fit' or stage is None:
+            # 使用 self.trainer.datamodule 访问数据模块
+            train_loader = self.trainer.datamodule.train_dataloader()
 
-        # return loss
+            # 计算总的训练步数
+            # self.trainer.max_epochs 是从 Trainer 的参数中获取的
+            self.total_steps = self.trainer.max_epochs * len(train_loader)
+
+            # 计算预热步数
+            self.warmup_steps = min(len(train_loader), self.args.warmup_steps)
+
+            print(f"--- [INFO] Calculated total training steps: {self.total_steps} ---")
+            print(f"--- [INFO] Calculated warmup steps: {self.warmup_steps} ---")
+
+    def configure_optimizers(self):
+
+        print(f"INFO: Configuring optimizer with differential learning rates...")
+
+
+        # 定义一个列表来存放不同参数组的配置
+        param_groups = []
+
+        llm_params = {
+            'params': self.llm_model.parameters(),
+            'lr': self.llm_target_lr,
+            'weight_decay': self.args.weight_decay
+        }
+        param_groups.append(llm_params)
+
+        adapter_params = {
+            'params': [
+                *self.embedding_norm.parameters(),
+                *self.projection.parameters(),
+                *self.post_projection_norm.parameters()
+            ],
+            'lr': self.args.init_lr,
+            'weight_decay': self.args.weight_decay
+        }
+        param_groups.append(adapter_params)
+
+        optimizer = optim.AdamW(
+            param_groups
+        )
+
+        if self.args.scheduler == 'linear_warmup_cosine_lr':
+            warmup_scheduler = LinearLR(
+                optimizer,
+                start_factor=0.001,
+                end_factor=1.0,
+                total_iters=self.warmup_steps
+            )
+            main_scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=self.total_steps - self.warmup_steps,
+                eta_min=self.args.min_lr
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, main_scheduler],
+                milestones=[self.warmup_steps]
+            )
+
+
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                }
+            }
+        else:
+            return optimizer
+
+    # def configure_optimizers(self):
+    #     """
+    #     一个干净的、使用 PyTorch 官方标准组件的优化器配置方法。
+    #     """
+    #     print(f"INFO: Configuring optimizer with official PyTorch schedulers...")
+
+    #     optimizer = optim.AdamW(
+    #         self.parameters(),
+    #         lr=self.args.init_lr,
+    #         weight_decay=self.args.weight_decay
+    #     )
+
+    #     if self.args.scheduler == 'linear_warmup_cosine_lr':
+    #         # 1. 定义预热阶段的调度器
+    #         # 从一个非常小的学习率线性增长到基础学习率 self.args.init_lr
+    #         warmup_scheduler = LinearLR(
+    #             optimizer,
+    #             start_factor=0.001, # 你可以根据需要调整起始因子
+    #             end_factor=1.0,
+    #             total_iters=self.warmup_steps
+    #         )
+
+    #         # 2. 定义余弦退火阶段的调度器
+    #         # 在预热结束后，从基础学习率衰减到最小学习率 self.args.min_lr
+    #         main_scheduler = CosineAnnealingLR(
+    #             optimizer,
+    #             T_max=self.total_steps - self.warmup_steps,
+    #             eta_min=self.args.min_lr
+    #         )
+
+    #         # 3. 使用 SequentialLR 将它们串联起来
+    #         # milestones=[self.warmup_steps] 表示在第 warmup_steps 步时，从 warmup_scheduler 切换到 main_scheduler
+    #         scheduler = SequentialLR(
+    #             optimizer,
+    #             schedulers=[warmup_scheduler, main_scheduler],
+    #             milestones=[self.warmup_steps]
+    #         )
+
+    #         # 4. 以 Lightning 推荐的字典格式返回
+    #         return {
+    #             "optimizer": optimizer,
+    #             "lr_scheduler": {
+    #                 "scheduler": scheduler,
+    #                 "interval": "step", # 表示每个训练步(step)都更新一次调度器
+    #             }
+    #         }
+    #     else:
+    #         # 如果不使用调度器，则只返回优化器
+    #         return optimizer
+
 
     def training_step(self, batch, batch_idx):
         if batch[0] is None:
             return None
-        if self.scheduler:
-            self.scheduler.step(self.trainer.global_step)
-        
+        # if self.scheduler:
+        #     self.scheduler.step(self.trainer.global_step)
+
         selfies_batch, selfies2_batch, pockets_emb, pock_attn_mask, _, _ = batch
         batch_size = selfies_batch.input_ids.shape[0]
 
@@ -350,14 +522,32 @@ class LLMPL(L.LightningModule):
         lm_loss0 = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
         lm_loss1 = self.forward(selfies2_batch, pockets_emb, pock_attn_mask)
         loss = (lm_loss0 + lm_loss1) / 2
-        
+
         self.log('train_loss', loss, sync_dist=True, batch_size=batch_size)
 
 
-        self.log('lr', self.trainer.optimizers[0].param_groups[0]['lr'], sync_dist=True, batch_size=batch_size)
-    
-        return loss
+        optimizer = self.trainer.optimizers[0]
 
+        # Log the learning rate for the LLM parameter group (index 0)
+        # Renamed to 'lr_llm' for clarity
+        self.log('lr/lr_llm', optimizer.param_groups[0]['lr'], sync_dist=True, batch_size=batch_size)
+
+        # Check if the second parameter group (adapter) exists and log its LR
+        if len(optimizer.param_groups) > 1:
+            # Log the learning rate for the Adapter parameter group (index 1)
+            self.log('lr/lr_adapter', optimizer.param_groups[1]['lr'], sync_dist=True, batch_size=batch_size)
+
+
+
+        # if self.global_step % 50 == 0:
+        #     with torch.no_grad():
+        #         # 新结构中，线性层分别在索引 0 和 3
+        #         first_linear_layer_norm = torch.linalg.norm(self.projection[0].weight)
+        #         second_linear_layer_norm = torch.linalg.norm(self.projection[3].weight)
+        #         self.log('debug/proj_norm_L1', first_linear_layer_norm)
+        #         self.log('debug/proj_norm_L2', second_linear_layer_norm)
+
+        return loss
 
     @torch.no_grad()
     def on_validation_epoch_start(self):
@@ -374,22 +564,7 @@ class LLMPL(L.LightningModule):
             print(f">>> [DEBUG] Entering validation_step for batch_idx {batch_idx}.")
         selfies_batch, selfies2_batch, pockets_emb, pock_attn_mask, ground_truth_mols, pocket_paths = batch
 
-        # 2. 打印出我们将要检查的张量的大小
-        current_batch_size = pockets_emb.shape[0]
-        print(f">>> [DEBUG] Rank {self.global_rank}: Current batch size is {current_batch_size}.")
 
-        # 3. 执行我们的核心检查，并在进入if语句时打印信息
-        if current_batch_size == 0:
-            print(f"!!! [DEBUG] Rank {self.global_rank}: EMPTY BATCH DETECTED! Skipping this step. !!!")
-            return
-
-        # 4. 如果没有跳过，也打印一条信息，确认代码继续执行
-        print(f">>> [DEBUG] Rank {self.global_rank}: Batch is valid, proceeding with validation logic.")
-        # ===================== END: 强力调试代码 =====================
-
-
-        
-     
 
         # --- 1. 深入的诊断逻辑 (仅在第一个batch执行) ---
         if self.trainer.is_global_zero and batch_idx == 0:
@@ -397,19 +572,15 @@ class LLMPL(L.LightningModule):
             print(f"|  <<<<<<<<<<<<<<<<< DIAGNOSTIC REPORT (Epoch: {self.current_epoch}) >>>>>>>>>>>>>>>>>  |")
             print("="*80)
 
-            # --- 诊断 Part A: Projection 之前的表征相似度 ---
             normalized_pockets_emb_before = self.embedding_norm(pockets_emb)
-            
-            # [--- 代码修正 ---]
-            # (B, L, D) -> (B, D) by averaging
+
             avg_emb_before = torch.mean(normalized_pockets_emb_before, dim=1)
             # Normalize for cosine similarity calculation
             avg_emb_before_norm = torch.nn.functional.normalize(avg_emb_before, p=2, dim=1)
             similarity_matrix_before = torch.matmul(avg_emb_before_norm, avg_emb_before_norm.T)
-            # [--- 代码修正结束 ---]
-            
+
             mask = torch.triu(torch.ones_like(similarity_matrix_before), diagonal=1).bool()
-            
+
             if mask.sum() > 0:
                 avg_sim_before = similarity_matrix_before[mask].mean().item()
                 max_sim_before = similarity_matrix_before[mask].max().item()
@@ -417,7 +588,8 @@ class LLMPL(L.LightningModule):
                 print(f"|  - Avg Cosine Similarity of Input Embeds:  {avg_sim_before:.4f}")
                 print(f"|  - Max Cosine Similarity of Input Embeds:  {max_sim_before:.4f}")
                 print("."*80)
-
+                self.log('debug/Avg_Cosine_Similarity_of_Input_Embeds', avg_sim_before, rank_zero_only=True)
+                self.log('debug/Max_Cosine_Similarity_of_Input_Embeds', max_sim_before, rank_zero_only=True)
             # --- 诊断 Part B: Projection 之后的表征相似度 ---
             projected_emb = self.projection(normalized_pockets_emb_before)
             prompt_embeds_after = self.post_projection_norm(projected_emb)
@@ -427,7 +599,7 @@ class LLMPL(L.LightningModule):
             avg_emb_after_norm = torch.nn.functional.normalize(avg_emb_after, p=2, dim=1)
             similarity_matrix_after = torch.matmul(avg_emb_after_norm, avg_emb_after_norm.T)
             # [--- 代码修正结束 ---]
-            
+
             if mask.sum() > 0:
                 avg_sim_after = similarity_matrix_after[mask].mean().item()
                 max_sim_after = similarity_matrix_after[mask].max().item()
@@ -435,18 +607,19 @@ class LLMPL(L.LightningModule):
                 print(f"|  - Avg Cosine Similarity of Output Embeds: {avg_sim_after:.4f}")
                 print(f"|  - Max Cosine Similarity of Output Embeds: {max_sim_after:.4f}")
                 print("."*80)
-
+                self.log('debug/Avg_Cosine_Similarity_of_Output_Embeds', avg_sim_after, rank_zero_only=True)
+                self.log('debug/Max_Cosine_Similarity_of_Output_Embeds', max_sim_after, rank_zero_only=True)
             # --- 诊断 Part C: Logits 检查 ---
             prompt_embeds_for_logits = prompt_embeds_after
             outputs = self.llm_model(inputs_embeds=prompt_embeds_for_logits, attention_mask=pock_attn_mask, return_dict=True)
             self.debug_inspect_logits(logits=outputs.logits, prompt_length=prompt_embeds_for_logits.shape[1],
                                       epoch=self.current_epoch, step=self.trainer.global_step, batch_idx=batch_idx)
-            
+
             print(f"|  <<<<<<<<<<<<<<<<<<<<<<<< END OF REPORT >>>>>>>>>>>>>>>>>>>>>>>  |")
             print("="*80 + "\n")
 
 
- 
+
         # --- 1. 计算并记录 loss ---
         lm_loss0 = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
         lm_loss1 = self.forward(selfies2_batch, pockets_emb, pock_attn_mask)
@@ -454,13 +627,19 @@ class LLMPL(L.LightningModule):
         self.log('val_loss', loss, sync_dist=True, batch_size=pockets_emb.shape[0])
 
 
-        num_output_for_this_epoch = 0 # <-- ADD THIS INITIALIZATION LINE
 
         is_2d_eval_epoch = (self.current_epoch + 1) % self.args.eval_2d_every_n_epochs == 0
         is_3d_eval_epoch = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
+        if not is_2d_eval_epoch and not is_3d_eval_epoch:
+            if self.trainer.is_global_zero:
+                print(f"\n--- [INFO] Epoch {self.current_epoch}: Skipping molecule generation as per schedule. ---")
+            return
+        # ==========================================================
+
+        # 只有在需要评估时，代码才会继续执行到这里
         if is_3d_eval_epoch:
             num_output_for_this_epoch = self.args.num_output_3d
-        elif is_2d_eval_epoch:
+        else: # 如果代码能到这里，is_2d_eval_epoch 必然为 True
             num_output_for_this_epoch = self.args.num_output_2d
 
         # --- 2. 直接调用重构后的函数来生成分子 ---
@@ -510,14 +689,22 @@ class LLMPL(L.LightningModule):
                         print(f"\n--- [INFO] Saved sample molecule to: {save_path} ---")
                 except Exception as e:
                     print(f"\n--- [WARNING] Failed to save sample molecule due to: {e} ---")
-                
-        
+
+
 
 
     @torch.no_grad()
     @torch.cuda.amp.autocast(dtype=torch.bfloat16)
     def on_validation_epoch_end(self):
+        if not self.trainer.is_global_zero: # 只在主进程执行
+            return
 
+        is_2d_eval_epoch = (self.current_epoch + 1) % self.args.eval_2d_every_n_epochs == 0
+        is_3d_eval_epoch = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
+        if not is_2d_eval_epoch and not is_3d_eval_epoch:
+            # 如果本周期不需要进行任何评估，则直接退出
+            print(f"\n--- [INFO] Epoch {self.current_epoch}: Skipping on_validation_epoch_end metrics calculation as per schedule. ---")
+            return
         if self.trainer.is_global_zero: # 只在主进程执行
             print("\n--- [DEBUG] Sanity Check: Unconditioned Generation ---")
             try:
@@ -546,7 +733,7 @@ class LLMPL(L.LightningModule):
                 # 尝试拆分token并检查词汇表
                 split_tokens = sf.split_selfies(raw_selfies)
                 print(f"Split Tokens: {split_tokens}")
-                
+
                 invalid_tokens = [tok for tok in split_tokens if tok not in self.tokenizer.vocab]
                 if invalid_tokens:
                     print(f"!!! INVALID TOKENS FOUND: {invalid_tokens}")
@@ -591,8 +778,8 @@ class LLMPL(L.LightningModule):
             sampled_rdmols=[mol for mol in sampled_rdmols if mol is not None]
             if len(sampled_rdmols) == 0:
                 print(f"\n[WARNING] Epoch {self.current_epoch}: No valid molecules were generated. Skipping detailed evaluation.")
-                return 
-            
+                return
+
 
             print(f"--- DEBUG: Prepared {len(sampled_rdmols)} valid RDKit molecules for evaluation. ---")
 
@@ -603,13 +790,9 @@ class LLMPL(L.LightningModule):
             print("--- DEBUG: Starting get_moses_metrics... ---")
             moses_metrics = self.trainer.datamodule.get_moses_metrics(sampled_rdmols)
             print("--- DEBUG: Finished get_moses_metrics. ---")
-            print("--- DEBUG: Starting to log all metrics... ---")
-            self.log('QED', moses_metrics['QED'], rank_zero_only=True)#
-            self.log('SA', moses_metrics['SA'], rank_zero_only=True)#
-            self.log('logP', moses_metrics['logP'], rank_zero_only=True)#
-            print("--- DEBUG: Finished metrics calculation and logging. ---\n")
+
             print("\n" + "="*60)
-            print(f"--- Evaluation Metrics for Epoch {self.current_epoch} ---")        
+
 
             # --- SBDD 相似度评估 ---
             print(f"--- DEBUG: Preparing pairs for SBDD similarity evaluation... ---")
@@ -617,7 +800,6 @@ class LLMPL(L.LightningModule):
             ground_truth_mols = []
             pocket_paths=[]
             for pair in self.validation_outputs:
-                # 解码生成的 SELFIES 为 RDKit Mol 对象
                 try:
                     gen_smiles = sf.decoder(pair['generated'])
                     mol_gen = Chem.MolFromSmiles(gen_smiles)
@@ -629,134 +811,130 @@ class LLMPL(L.LightningModule):
                     continue # 如果解码失败则跳过
 
             print(f"--- DEBUG: Starting SBDD_validation for {len(generated_mols)} valid pairs. ---")
-            
-            # 调用我们新封装的函数
+
             sbdd_metrics = SBDD_validation(generated_mols, ground_truth_mols)
-            
+
             # --- 打印和记录新的SBDD指标 ---
             print("\n[--- SBDD Similarity Metrics vs. Ground Truth ---]")
             for key, value in sbdd_metrics.items():
                 print(f"  - {key:<20}: {value:.4f}")
-                self.log(key, value, rank_zero_only=True) # 记录到日志系统
-                
+                self.log(key, value, rank_zero_only=True)
+
             print("="*60 + "\n")
 
             print("\n[--- Basic 2D Metrics ---]")
             for key, value in eval_results_2d.items():
-                print(f"  - {key:<12}: {value:.4f}") 
+                print(f"  - {key:<12}: {value:.4f}")
+                self.log(key, value, rank_zero_only=True)
             print("\n[--- Advanced MOSES & Drug-likeness Metrics ---]")
             for key, value in moses_metrics.items():
                 print(f"  - {key:<12}: {value:.4f}")
+                self.log(key, value, rank_zero_only=True)
             print("="*60 + "\n")
 
-            print(f"--- DEBUG: Starting 3D conversion and docking for {len(self.validation_outputs)} generated sequences. ---")
+        # print(f"--- DEBUG: Starting 3D conversion and docking for {len(self.validation_outputs)} generated sequences. ---")
 
-        run_3d_eval = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
-        if run_3d_eval:
-            # --- 2. 准备3D分子并进行全面评估 (现在使用多进程并行) ---
-            print(f"\n--- DEBUG: Starting PARALLEL 3D conversion for {len(self.validation_outputs)} generated sequences. ---")
+        # run_3d_eval = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
+        # if run_3d_eval:
+        #     # --- 2. 准备3D分子并进行全面评估 (现在使用多进程并行) ---
+        #     print(f"\n--- DEBUG: Starting PARALLEL 3D conversion for {len(self.validation_outputs)} generated sequences. ---")
 
-            tasks = [(pair['generated'], pair['pocket_path']) for pair in self.validation_outputs]
-            
-            generated_mols_3d = []
-            pocket_paths_for_vina = []
-            failed_molecules_info = [] 
-            successful_molecules_info = []
+        #     tasks = [(pair['generated'], pair['pocket_path']) for pair in self.validation_outputs]
 
-            # 获取CPU核心数，可以留一两个核心给系统
-            import multiprocessing as mp
-            import os
+        #     generated_mols_3d = []
+        #     pocket_paths_for_vina = []
+        #     failed_molecules_info = []
+        #     successful_molecules_info = []
 
-            slurm_cpus_str = os.getenv('SLURM_CPUS_PER_TASK')
-            if slurm_cpus_str:
-                cpu_cores = int(slurm_cpus_str)
-                print(f"--- INFO: Detected Slurm allocation. Using {cpu_cores} allocated cores for 3D generation. ---")
-            else:
-                # 如果不在Slurm环境中，回退到使用mp.cpu_count()
-                cpu_cores = mp.cpu_count()
-                print(f"--- INFO: Not in a Slurm environment. Using total system cores: {cpu_cores} for 3D generation. ---")
-            
-            # 根据获取的核心数计算进程数，为操作系统和主进程留出余地
-            num_processes = max(1, cpu_cores - 2)
-            print(f"--- INFO: Using {num_processes} CPU cores for parallel processing. ---")
+        #     # 获取CPU核心数，可以留一两个核心给系统
+        #     import multiprocessing as mp
+        #     import os
 
-            with mp.Pool(processes=num_processes) as pool:
-                results_iterator = pool.imap_unordered(worker_generate_3d, tasks)
-                
-                for mol_3d, pocket_path, original_selfies in tqdm(results_iterator, total=len(tasks), desc="Generating 3D conformers"):
-                    if mol_3d is not None and pocket_path is not None:
-                        generated_mols_3d.append(mol_3d)
-                        pocket_paths_for_vina.append(pocket_path)
-                        try:
-                            smiles = sf.decoder(original_selfies)
-                        except:
-                            smiles = "DECODING_ERROR"
-                        successful_molecules_info.append({'selfies': original_selfies, 'smiles': smiles})
-                    else:
-                        try:
-                            smiles = sf.decoder(original_selfies) if original_selfies else "EMPTY_SELFIES"
-                        except:
-                            smiles = "DECODING_ERROR"
-                        failed_molecules_info.append({'selfies': original_selfies, 'smiles': smiles})
-            
-            # --- 打印成功和失败的样本 ---
-            if failed_molecules_info:
-                print("\n--- [DEBUG] Molecules that failed 3D generation (sample) ---")
-                for i, failure in enumerate(failed_molecules_info[:5]): 
-                    print(f"  - Failed Mol {i+1}:")
-                    print(f"    - Original SELFIES: {failure['selfies']}")
-                    print(f"    - Decoded SMILES  : {failure['smiles']}")
-                print("----------------------------------------------------------\n")
-            
-            if successful_molecules_info:
-                print("\n--- [DEBUG] Sample of SUCCESSFULLY generated 3D molecules ---")
-                for i, success in enumerate(successful_molecules_info[:5]): 
-                    print(f"  - Success Mol {i+1}:")
-                    print(f"    - Original SELFIES: {success['selfies']}")
-                    print(f"    - Decoded SMILES  : {success['smiles']}")
-                print("----------------------------------------------------------\n")
+        #     slurm_cpus_str = os.getenv('SLURM_CPUS_PER_TASK')
+        #     if slurm_cpus_str:
+        #         cpu_cores = int(slurm_cpus_str)
+        #         print(f"--- INFO: Detected Slurm allocation. Using {cpu_cores} allocated cores for 3D generation. ---")
+        #     else:
+        #         # 如果不在Slurm环境中，回退到使用mp.cpu_count()
+        #         cpu_cores = mp.cpu_count()
+        #         print(f"--- INFO: Not in a Slurm environment. Using total system cores: {cpu_cores} for 3D generation. ---")
 
-                num_generated = len(generated_mols_3d)
-                num_failed = len(failed_molecules_info)
-                total_attempted = num_generated + num_failed
+        #     # 根据获取的核心数计算进程数，为操作系统和主进程留出余地
+        #     num_processes = max(1, cpu_cores - 2)
+        #     print(f"--- INFO: Using {num_processes} CPU cores for parallel processing. ---")
+
+        #     with mp.Pool(processes=num_processes) as pool:
+        #         results_iterator = pool.imap_unordered(worker_generate_3d, tasks)
+
+        #         for mol_3d, pocket_path, original_selfies in tqdm(results_iterator, total=len(tasks), desc="Generating 3D conformers"):
+        #             if mol_3d is not None and pocket_path is not None:
+        #                 generated_mols_3d.append(mol_3d)
+        #                 pocket_paths_for_vina.append(pocket_path)
+        #                 try:
+        #                     smiles = sf.decoder(original_selfies)
+        #                 except:
+        #                     smiles = "DECODING_ERROR"
+        #                 successful_molecules_info.append({'selfies': original_selfies, 'smiles': smiles})
+        #             else:
+        #                 try:
+        #                     smiles = sf.decoder(original_selfies) if original_selfies else "EMPTY_SELFIES"
+        #                 except:
+        #                     smiles = "DECODING_ERROR"
+        #                 failed_molecules_info.append({'selfies': original_selfies, 'smiles': smiles})
+
+        #     # --- 打印成功和失败的样本 ---
+        #     if failed_molecules_info:
+        #         print("\n--- [DEBUG] Molecules that failed 3D generation (sample) ---")
+        #         for i, failure in enumerate(failed_molecules_info[:5]):
+        #             print(f"  - Failed Mol {i+1}:")
+        #             print(f"    - Original SELFIES: {failure['selfies']}")
+        #             print(f"    - Decoded SMILES  : {failure['smiles']}")
+        #         print("----------------------------------------------------------\n")
+
+        #     if successful_molecules_info:
+        #         print("\n--- [DEBUG] Sample of SUCCESSFULLY generated 3D molecules ---")
+        #         for i, success in enumerate(successful_molecules_info[:5]):
+        #             print(f"  - Success Mol {i+1}:")
+        #             print(f"    - Original SELFIES: {success['selfies']}")
+        #             print(f"    - Decoded SMILES  : {success['smiles']}")
+        #         print("----------------------------------------------------------\n")
+
+        #         num_generated = len(generated_mols_3d)
+        #         num_failed = len(failed_molecules_info)
+        #         total_attempted = num_generated + num_failed
 
 
-                grouped_mols_for_eval = defaultdict(list)
-                
-                
-                
-                for mol, path in zip(generated_mols_3d, pocket_paths_for_vina):
-                    grouped_mols_for_eval[path].append(mol)
-                # --- Final check and call to the evaluation function ---
-                
-                if not grouped_mols_for_eval:
-                    print("\n[WARNING] No valid 3D molecules to evaluate. Skipping comprehensive evaluation.")
-                else:
-                    print("\n--- [INFO] 3D Molecule Generation Summary ---")
-                    print(f"  - Total sequences attempted  : {total_attempted}")
-                    print(f"  - Successfully generated     : {num_generated} ({num_generated/total_attempted*100:.2f}%)")
-                    print(f"  - Failed to generate         : {num_failed} ({num_failed/total_attempted*100:.2f}%)")
-                    print(f"  - Number of keys:", len(grouped_mols_for_eval))
-                    print("----------------------------------------------------------\n")
-                    
-                    # Call the single, powerful evaluation function
-                    eval_metrics = run_full_evaluation(
-                    grouped_mols=grouped_mols_for_eval 
-                    )
+        #         grouped_mols_for_eval = defaultdict(list)
 
 
 
+        #         for mol, path in zip(generated_mols_3d, pocket_paths_for_vina):
+        #             grouped_mols_for_eval[path].append(mol)
+        #         # --- Final check and call to the evaluation function ---
 
+        #         if not grouped_mols_for_eval:
+        #             print("\n[WARNING] No valid 3D molecules to evaluate. Skipping comprehensive evaluation.")
+        #         else:
+        #             print("\n--- [INFO] 3D Molecule Generation Summary ---")
+        #             print(f"  - Total sequences attempted  : {total_attempted}")
+        #             print(f"  - Successfully generated     : {num_generated} ({num_generated/total_attempted*100:.2f}%)")
+        #             print(f"  - Failed to generate         : {num_failed} ({num_failed/total_attempted*100:.2f}%)")
+        #             print(f"  - Number of keys:", len(grouped_mols_for_eval))
+        #             print("----------------------------------------------------------\n")
 
-                    # Log the results
-                    print("\n" + "="*60)
-                    print(f"--- Logging Final Metrics for Epoch {self.current_epoch} ---")
-                    if eval_metrics:
-                        for key, value in eval_metrics.items():
-                            log_key = key.replace(' ', '_').replace('(%)', 'percent').replace('(', '').replace(')', '')
-                            self.log(f'eval/{log_key}', value, sync_dist=True)
-                            print(f"  - Logged eval/{log_key}: {value:.4f}")
-                    print("="*60 + "\n")
+        #             # Call the single, powerful evaluation function
+        #             eval_metrics = run_full_evaluation(
+        #             grouped_mols=grouped_mols_for_eval
+        #             )
+        #             # Log the results
+        #             print("\n" + "="*60)
+        #             print(f"--- Logging Final Metrics for Epoch {self.current_epoch} ---")
+        #             if eval_metrics:
+        #                 for key, value in eval_metrics.items():
+        #                     log_key = key.replace(' ', '_').replace('(%)', 'percent').replace('(', '').replace(')', '')
+        #                     self.log(f'eval/{log_key}', value, sync_dist=True)
+        #                     print(f"  - Logged eval/{log_key}: {value:.4f}")
+        #             print("="*60 + "\n")
 
 
     @torch.no_grad()
@@ -819,12 +997,12 @@ class LLMPL(L.LightningModule):
                     f.write(f'{selfies}\t{smiles_with_chirality}\t{smiles_without_chirality}\t{context}' + '\n')
 
         return sampled_sequences
-    
+
     # In LLMPL class
     @torch.no_grad()
     def sample_selfies_for_pocket(
         self,
-        pockets_emb,  
+        pockets_emb,
         attention_mask=None,
         do_sample=True,
         num_beams=5,
@@ -846,9 +1024,9 @@ class LLMPL(L.LightningModule):
         bos_token_id = self.tokenizer.bos_token_id
         bos_token_tensor = torch.tensor([[bos_token_id]] * batch_size, device=device)
         bos_embedding = self.llm_model.get_input_embeddings()(bos_token_tensor)
-                
 
-        
+
+
         inputs_embeds = torch.cat([bos_embedding, pocket_emb_lm], dim=1)
         # --- [ 新增调试代码 ] ---
         if batch_idx == 0: # 只在第一个batch打印，避免刷屏
@@ -862,7 +1040,7 @@ class LLMPL(L.LightningModule):
 
         # --- 4. 最终调用 generate 函数 ---
         outputs = self.llm_model.generate(
-            inputs_embeds=inputs_embeds,  
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             do_sample=do_sample,
             temperature=temperature,
@@ -980,6 +1158,11 @@ class LLMPL(L.LightningModule):
         parser.add_argument('--lora_dropout', type=float, default=0.2)
 
         # optimization
+        parser.add_argument('--llm_target_lr', type=float, default=5e-7, help='Target learning rate for the LLM backbone in Stage 2.')
+        parser.add_argument('--llm_warmup_steps', type=int, default=500, help='Number of re-warmup steps for the LLM in Stage 2.')
+
+        parser.add_argument('--projection_dropout', type=float, default=0.1, help='projection_dropout')
+
         parser.add_argument('--weight_decay', type=float, default=0.05, help='optimizer weight decay')
         parser.add_argument('--init_lr', type=float, default=1e-4, help='optimizer init learning rate')
         parser.add_argument('--min_lr', type=float, default=1e-5, help='optimizer min learning rate')
@@ -988,6 +1171,7 @@ class LLMPL(L.LightningModule):
         parser.add_argument('--lr_decay_rate', type=float, default=0.9, help='optimizer lr decay rate')
         parser.add_argument('--scheduler', type=str, default='linear_warmup_cosine_lr', help='type of scheduler') # or
         parser.add_argument('--zero_embedding',action='store_true', default=False)
+        parser.add_argument('--decay_projection_lr',action='store_true', default=False)
         parser.add_argument('--optimizer', type=str, default='adamw', help='type of scheduler')
         parser.add_argument('--init_checkpoint', type=str, default=None)
         parser.add_argument('--skip_eval', action='store_true', default=False)
@@ -1024,7 +1208,7 @@ class LLMPL(L.LightningModule):
     #         if not cids:
     #             # 如果未能生成任何构象，则认为失败
     #             return None
-            
+
     #         # 优化所有构象
     #         res = optimizer(mol, numThreads=1)
     #         # res 可能是 [(conf_id, energy), ...] 的列表或表示失败的整数
@@ -1033,7 +1217,7 @@ class LLMPL(L.LightningModule):
 
     #         # 选取能量最低的构象
     #         min_energy_idx = np.argmin([e[1] for e in res])
-            
+
     #         # 创建一个只包含最优构象的新分子对象并返回
     #         best_mol = Chem.Mol(mol)
     #         best_mol.RemoveAllConformers()
@@ -1068,18 +1252,18 @@ class LLMPL(L.LightningModule):
             optimizer = AllChem.MMFFOptimizeMoleculeConfs
         else: # fast模式
             # 快速模式：采样更少构象，使用速度飞快的UFF力场
-            num_confs = 5 
+            num_confs = 5
             optimizer = AllChem.UFFOptimizeMoleculeConfs
 
         try:
             cids = AllChem.EmbedMultipleConfs(mol, numConfs=num_confs, params=params)
             if not cids: raise ValueError("Conformer embedding failed.")
-            
+
             res = optimizer(mol, numThreads=1) # **关键优化点，见方案二**
             if not res: raise ValueError("Optimization failed.")
 
             min_energy_idx = np.argmin([e[1] for e in res])
-            
+
             best_mol = Chem.Mol(mol)
             best_mol.RemoveAllConformers()
             best_conformer = mol.GetConformer(int(min_energy_idx))
@@ -1090,7 +1274,7 @@ class LLMPL(L.LightningModule):
                 mol_fallback = Chem.Mol(mol)
                 if AllChem.EmbedMolecule(mol_fallback, params) == -1:
                     return None
-                
+
                 if quality == 'fast':
                     AllChem.UFFOptimizeMolecule(mol_fallback)
                 else:
@@ -1168,7 +1352,7 @@ class LLMPL(L.LightningModule):
         print("\n" + "="*80)
         print(f"|  <<<<<<<<<<<<<<<<<<<<< END OF REPORT >>>>>>>>>>>>>>>>>>>>>>>  |")
         print("="*80 + "\n")
-        
+
 def canonicalize_selfies(selfies):
     smiles = sf.decoder(selfies)
     try:
@@ -1188,4 +1372,3 @@ def reencode_selfies(selfies):
     except Exception:
         return '', '', ''
     return reencoded_selfies, smiles_with_chirality, smiles_without_chirality
-

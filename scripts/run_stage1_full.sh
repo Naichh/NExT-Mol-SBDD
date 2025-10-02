@@ -8,9 +8,11 @@ export PYTHONUNBUFFERED=1
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=8000
 #export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=ib1
-export NCCL_IB_HCA=ib1
+export NCCL_IB_HCA=mlx5_3
 export PL_TORCH_DISTRIBUTED_BACKEND_TIMEOUT=3600
 export TOKENIZERS_PARALLELISM=false
+ulimit -n 65535
+
 # --- 1. 工作目录与环境配置 ---
 PROJECT_ROOT="/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol"
 cd $PROJECT_ROOT
@@ -41,7 +43,7 @@ RUN_NAME="sbdd_full-finetune_${TIMESTAMP}"
 RESULTS_DIR="${PROJECT_ROOT}/results/training/stage1/$(date +'%Y%m%d_%H%M%S')/${RUN_NAME}"
 
 CHECKPOINTS_DIR="/data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/${RUN_NAME}"
-
+DS_CONFIG="/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/ds_config.json"
 
 
 mkdir -p "$RESULTS_DIR"
@@ -49,7 +51,7 @@ mkdir -p "$CHECKPOINTS_DIR"
 
 
 # --- 4. 执行命令 ---
-export CUDA_VISIBLE_DEVICES='0,1,2,3'
+export CUDA_VISIBLE_DEVICES='0,1'
 
 echo "开始执行SBDD Stage 1: 全量微调..."
 echo "标准输出日志将保存在: ${RESULTS_DIR}/training_out.log"
@@ -59,44 +61,53 @@ echo "模型将保存在: ${CHECKPOINTS_DIR}"
 # 确保输出目录存在
 
 
-torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
+torchrun --nproc_per_node=2 --master_port=55369  llm_train_cross_docked.py \
     --output_dir "$CHECKPOINTS_DIR" \
     --filename "$RUN_NAME" \
+    --deepspeed_config "$DS_CONFIG" \
     --seed 42 \
     --devices 'auto' \
     --mode 'train' \
     --max_epochs 300 \
-    --batch_size 64 \
+    --batch_size 48 \
     --eval_batch_size 32\
-    --temperature 0.5 \
+    --temperature 0.2 \
     --do_sample \
     --save_every_n_epochs 6 \
     --check_val_every_n_epoch 1 \
     --dataset_root "$SBDD_DATA_ROOT" \
     --split_file "$SPLIT_FILE" \
-    --num_output_2d 100 \
+    --num_output_2d 30 \
     --num_output_3d 5 \
     --num_beams 1 \
-    --num_workers 4 \
-    --eval_2d_every_n_epochs 3 \
+    --num_workers 0 \
+    --epoch_without_eval 1 \
+    --eval_2d_every_n_epochs 1 \
     --eval_3d_every_n_epochs 200 \
     --max_sf_tokens 128 \
     --max_pocket_tokens 128 \
     --llm_model "$LLM_MODEL_ID" \
     --llm_tune 'full' \
-    --unfreeze_epoch 0 \
     --accelerator 'gpu' \
-    --warmup_steps 1000 \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\
-    --init_lr 5e-6 \
-    --min_lr 1e-7 \
+    --init_lr 1e-5 \
+    --min_lr 1e-6 \
+    --unfreeze_epoch 13 \
+    --llm_target_lr 1e-7 \
+    --llm_warmup_steps 500\
+    --warmup_steps 2500 \
     --gradient_clip_val 1.0 \
-    --epoch_without_eval 1 \
-    --attention_dropout 0.2 \
-    --weight_decay 0.05 \
+    --attention_dropout 0.1 \
+    --weight_decay 0.02 \
     --strategy_name 'deepspeed' \
     > "${RESULTS_DIR}/training_out.log" \
     2> "${RESULTS_DIR}/training_err.log"
 
 echo "SBDD Stage 1 运行执行完毕。"
+
+#    --llm_target_lr 1e-7 \
+#decay_projection_lr
+#    --ckpt_path "$CKPT_PATH" \
+# --llm_warmup_steps 500\
+#--projection_dropout 0.1 \

@@ -142,16 +142,18 @@ def main(args):
         print(f"Using multi-GPU training with devices: {args.devices}")
         if args.strategy_name == 'deepspeed':
             strategy = L.pytorch.strategies.DeepSpeedStrategy(stage=2)
+            print(f"DeepSpeedStrategy has been Initialized")
         else:
             strategy = L.pytorch.strategies.DDPStrategy(find_unused_parameters=True)
-    # 单卡场景
+            print(f"DDPStrategy has been Initialized")
     else:
         print("Using single-GPU or CPU")
         if args.ckpt_path and os.path.isdir(args.ckpt_path):
             print(f"Detected a directory checkpoint for single-device '{args.mode}' mode. Forcing DeepSpeedStrategy to load it.")
             strategy = L.pytorch.strategies.DeepSpeedStrategy(stage=2)
+            print(f"DeepSpeedStrategy has been Initialized")
 
-
+    print(f"Preparing the Trainer.. ")
     trainer = L.Trainer(
         accelerator=args.accelerator,
         devices=args.devices,
@@ -162,10 +164,13 @@ def main(args):
         check_val_every_n_epoch=args.check_val_every_n_epoch,
         log_every_n_steps=20,
         callbacks=callbacks,
-        num_sanity_val_steps=0,
+        num_sanity_val_steps=0, 
         logger=[csv_logger, wandb_logger],
         gradient_clip_val=args.gradient_clip_val
     )
+    print(f"The Trainer has been prepared!")
+
+
     if trainer.is_global_zero:
         log_dir = tb_logger.log_dir
         print("\n" + "="*80)
@@ -220,6 +225,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_output_2d', type=int, default=100, help='Number of molecules to generate for 2D evaluation.')
     parser.add_argument('--num_output_3d', type=int, default=5, help='Number of molecules to generate for 3D evaluation.')
     parser.add_argument('--gradient_clip_val', type=float, default=1.0, help='Value for gradient clipping.')
+    parser.add_argument('--deepspeed_config', type=str, default=None, help='Path to deepspeed config file.')
 
         # 数据参数
     parser.add_argument('--dataset_root', type=str, default="/home/mydata/nextmol/crossdocked_pocket")

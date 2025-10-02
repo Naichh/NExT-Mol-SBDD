@@ -2,13 +2,15 @@ import torch
 import lightning.pytorch as pl
 import os
 import pickle
+from tqdm import tqdm
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.dataset import random_split
 from .cross_docked_utils import PocketLigandPairDataset
 from .cross_docked_collater import LMCollater
 from pathlib import Path
-from evaluation.eval_functions import get_moses_metrics 
+from evaluation.eval_functions import get_moses_metrics
+
 class PocketLigandDataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -31,92 +33,103 @@ class PocketLigandDataModule(pl.LightningDataModule):
         self.max_sf_tokens = max_sf_tokens
         self.max_pocket_tokens = max_pocket_tokens
         self.eval_batch_size=eval_batch_size
+        self.cache_dir = "/data/share/liuzhiyuan/nai/NExT-Mol/datasets/cache/"
+        self.cached_data_path = os.path.join(self.cache_dir, "all_data_stage1_cache.pt")
+
+    def prepare_data(self):
+        """
+        这个方法只在Rank 0上执行一次。
+        它的任务是检查缓存是否存在，如果不存在，就创建它。
+        """
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir, exist_ok=True)
+            print(f"INFO: Created temporary cache directory: {self.cache_dir}")
+
+        if os.path.exists(self.cached_data_path):
+            print(f"INFO: 找到了预计算的缓存文件 '{self.cached_data_path}'，跳过数据准备。")
+            return
 
 
+        print("INFO: 未找到缓存文件，开始在Rank 0上进行一次性数据预加载...")
 
-    # Inside your PocketLigandDataModule class:
+        # 1. 创建一个临时的、仅用于加载的Dataset实例
+        full_dataset_on_disk = PocketLigandPairDataset(self.dataset_root)
+
+        # 2. 执行内存加载
+        print(f"INFO: Pre-loading all {len(full_dataset_on_disk)} samples into RAM. This may take a while...")
+        data_cache = {}
+        # 使用 with open 确保文件句柄被正确关闭
+        with open(full_dataset_on_disk.index_path, 'rb') as f:
+            index_list = pickle.load(f)
+
+        for i in tqdm(range(len(index_list)), desc="Caching data into RAM on Rank 0"):
+            # 直接调用 __getitem__ 方法加载数据
+            sample = full_dataset_on_disk[i]
+            if sample is not None:
+                # 使用原始的索引元组作为键
+                original_idx_tuple = index_list[i]
+                data_cache[original_idx_tuple] = sample
+
+        # 3. 将加载好的数据保存到磁盘，供所有进程使用
+        print(f"INFO: 数据缓存完成，正在保存到 '{self.cached_data_path}'...")
+        torch.save(data_cache, self.cached_data_path)
+        print("INFO: 缓存文件保存成功。")
+
+    # <<< 核心修改点 #2: 简化 setup 方法 >>>
     def setup(self, stage=None):
-        cache_dir = os.path.join(self.dataset_root, 'cache')
-        file_to_idx_cache_path = os.path.join(cache_dir, 'file_to_idx.pkl')
-        train_cache_path = os.path.join(cache_dir, 'train_rdmols.pkl')
-        test_cache_path = os.path.join(cache_dir, 'test_rdmols.pkl')
+        """
+        这个方法会在所有Rank上执行。
+        它的任务是加载已准备好的数据，并创建训练/测试集。
+        """
+        print(f"INFO: Rank {self.trainer.global_rank} 正在设置 DataModule...")
 
-        try:
-            # --- FAST PATH: Try to load from pre-computed cache ---
-            print("INFO: Attempting to load data from pre-computed cache...")
-            
-            # Check if all required files exist
-            for path in [file_to_idx_cache_path, train_cache_path, test_cache_path]:
-                if not os.path.exists(path):
-                    # If any file is missing, jump to the except block
-                    raise FileNotFoundError(f"Cache file not found: {path}")
+        # 1. 从磁盘加载已由Rank 0准备好的缓存文件
+        # PyTorch Lightning会自动确保在执行setup之前，prepare_data已经完成
+        print(f"INFO: Rank {self.trainer.global_rank} is loading data from '{self.cached_data_path}'")
+        full_data_cache = torch.load(self.cached_data_path, map_location='cpu')
 
-            # Load all caches
-            with open(file_to_idx_cache_path, 'rb') as f:
-                file_to_idx = pickle.load(f)
-            
-            split = torch.load(self.split_file)
-            full_dataset = PocketLigandPairDataset(self.dataset_root)
+        # 2. 创建一个在RAM模式下运行的Dataset实例
+        cached_dataset = PocketLigandPairDataset(self.dataset_root, data_cache=full_data_cache)
 
-            # Define the conversion function locally
-            def convert_split_to_indices(file_pairs):
-                indices = []
-                for pocket_fn, ligand_fn in file_pairs:
-                    key = (pocket_fn, ligand_fn)
-                    if key in file_to_idx:
-                        indices.append(file_to_idx[key])
-                return indices
+        # 3. 后续的逻辑几乎不变
+        split = torch.load(self.split_file)
 
-            train_indices = convert_split_to_indices(split['train'])
-            test_indices = convert_split_to_indices(split['test'])
-            
-            self.train_dataset = Subset(full_dataset, train_indices)
-            self.test_dataset = Subset(full_dataset, test_indices)
-            
-            with open(train_cache_path, 'rb') as f: self.train_rdmols = pickle.load(f)
-            with open(test_cache_path, 'rb') as f: self.test_rdmols = pickle.load(f)
+        print("INFO: Building fast lookup map...")
+        short_key_to_int_idx_map = {
+            (key[0], key[1]): i
+            for i, key in enumerate(cached_dataset.index)
+        }
 
-            print("INFO: Successfully loaded all data from cache.")
+        def convert_split_to_indices(file_pairs):
+            indices = []
+            for pocket_fn, ligand_fn in tqdm(file_pairs, desc="Converting split files to indices"):
+                short_key = (pocket_fn, ligand_fn)
+                idx = short_key_to_int_idx_map.get(short_key)
+                if idx is not None:
+                    indices.append(idx)
+            return indices
 
-        except FileNotFoundError:
-            # --- SLOW PATH: Fallback to on-the-fly loading if cache is missing ---
-            print("\n" + "="*80)
-            print("WARNING: Cache not found or incomplete. Falling back to slow, on-the-fly data loading.")
-            print("         For a significant speed-up, please run preprocess_dataset.py first.")
-            print("="*80 + "\n")
-            
-            # Re-implement the on-the-fly logic without saving any caches
-            full_dataset = PocketLigandPairDataset(self.dataset_root)
-            split = torch.load(self.split_file)
+        train_indices = convert_split_to_indices(split['train'])
+        test_indices = convert_split_to_indices(split['test'])
 
-            # Build the map in memory for this run only
-            file_to_idx_map = {
-                (p, l): i
-                for i, (p, l, _, _) in enumerate(full_dataset.index)
-                if p is not None and l is not None
-            }
-            
-            def convert_split_to_indices_runtime(file_pairs):
-                indices = []
-                for pocket_fn, ligand_fn in file_pairs:
-                    key = (pocket_fn, ligand_fn)
-                    if key in file_to_idx_map:
-                        indices.append(file_to_idx_map[key])
-                return indices
+        self.train_dataset = Subset(cached_dataset, train_indices)
+        self.test_dataset = Subset(cached_dataset, test_indices)
+        print("INFO: Efficiently extracting train molecules by index...")
+        self.train_rdmols = []
+        for idx in tqdm(train_indices, desc="Extracting train rdmol"):
+            sample = cached_dataset[idx]
+            if sample is not None and 'rdmol' in sample:
+                self.train_rdmols.append(sample['rdmol'])
 
-            train_indices = convert_split_to_indices_runtime(split['train'])
-            test_indices = convert_split_to_indices_runtime(split['test'])
-            
-            self.train_dataset = Subset(full_dataset, train_indices)
-            self.test_dataset = Subset(full_dataset, test_indices)
-            
-            print("WARNING: Parsing RDKit molecules on-the-fly. This will be slow...")
-            self.train_rdmols = [self.train_dataset[i]['rdmol'] for i in range(len(self.train_dataset)) if self.train_dataset[i]['rdmol'] is not None]
-            self.test_rdmols = [self.test_dataset[i]['rdmol'] for i in range(len(self.test_dataset)) if self.test_dataset[i]['rdmol'] is not None]
 
-        # This part is common to both paths
+        print("INFO: Efficiently extracting test molecules by index...")
+        self.test_rdmols = []
+        for idx in tqdm(test_indices, desc="Extracting test rdmol"):
+            sample = cached_dataset[idx]
+            if sample is not None and 'rdmol' in sample:
+                self.test_rdmols.append(sample['rdmol'])
         self.get_moses_metrics = get_moses_metrics(self.test_rdmols, 1)
-        print("INFO: DataModule setup is complete.")
+        print("INFO: DataModule setup is complete. Training will now run entirely from RAM.")
 
 
     def train_dataloader(self):
@@ -157,7 +170,7 @@ class PocketLigandDataModule(pl.LightningDataModule):
         if self.num_workers > 0:
             dataloader_kwargs['multiprocessing_context'] = 'spawn'
             # persistent_workers is often set to True here as well for speed
-            dataloader_kwargs['persistent_workers'] = True 
+            dataloader_kwargs['persistent_workers'] = True
 
         return DataLoader(self.test_dataset, **dataloader_kwargs)
 

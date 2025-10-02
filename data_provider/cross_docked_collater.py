@@ -20,31 +20,23 @@ class LMCollater:
 
 
     def __call__(self, batch):
-        # 关键修改：在处理之前，过滤掉所有值为 None 的无效样本
         batch = [item for item in batch if item is not None]
-        
-        # 如果过滤后整个批次都空了，返回None，让训练循环跳过
+
         if not batch:
-            # 构造一条详细的日志信息
             log_message = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] --- CRITICAL DIAGNOSIS (Worker PID: {self.worker_id}) ---\n" \
                           f"The 'if not batch:' check was successfully triggered.\n" \
                           f"This proves the LATEST version of LMCollater is running and has correctly detected an empty batch.\n" \
                           f"Returning (None, ...) to skip this batch.\n\n"
-            
-            # 1. 在终端打印，以便实时查看（如果可能）
+
             print("\n" + "*"*80, flush=True)
             print(log_message, flush=True)
             print("*"*80 + "\n", flush=True)
 
-            # 2. 将证据写入一个独立的文件，这是我们明天检查的关键
-            #    使用 'a' 模式（追加），以便多个进程都能写入
             with open("DIAGNOSIS_PROOF.log", "a") as f:
                 f.write(log_message)
 
-            # 正常返回None元组，不中断训练
             return None, None, None, None, None, None
 
-        # --- 后续的所有代码都和原来完全一样 ---
         selfies = [item['selfies'] for item in batch]
         selfies2 = [item['selfies2'] for item in batch]
         pockets = [item['pdb_embedding'] for item in batch]
