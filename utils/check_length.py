@@ -11,7 +11,7 @@ CACHE_PATH = "/data/share/liuzhiyuan/nai/NExT-Mol/datasets/cache/all_data_stage1
 
 LLM_MODEL_ID = "acharkq/MoLlama"
 
-MAX_SF_TOKENS = 128
+MAX_SF_TOKENS = 192
 MAX_POCKET_TOKENS = 128
 
 
@@ -29,20 +29,15 @@ def analyze_dataset_lengths():
 
     print(f"\n[1/4] 正在加载分词器 '{LLM_MODEL_ID}'...")
     try:
-        # 禁用关于未使用权重的警告，因为我们只需要分词器
         warnings.filterwarnings("ignore", category=UserWarning, message=".*model weights.*")
         tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
         print("分词器加载成功。")
     except Exception as e:
         print(f"\n[错误] 加载分词器失败: {e}")
-        print("请检查模型ID是否正确，以及你是否有网络连接来下载它。")
         return
 
-    # 2. 加载预处理缓存数据
     print(f"\n[2/4] 正在从 '{CACHE_PATH}' 加载预处理数据...")
-    print("这可能需要一些时间，取决于文件大小...")
     try:
-        # 将数据加载到CPU以节省显存
         data_cache = torch.load(CACHE_PATH, map_location='cpu')
         if not isinstance(data_cache, dict) or not data_cache:
             print("[错误] 缓存文件格式不正确或为空。")
@@ -51,7 +46,6 @@ def analyze_dataset_lengths():
         print(f"数据加载成功！共找到 {num_samples} 个样本。")
     except Exception as e:
         print(f"\n[错误] 加载缓存文件失败: {e}")
-        print("请检查文件路径是否正确，以及文件是否损坏。")
         return
 
     # 3. 遍历数据并收集长度信息
@@ -64,21 +58,16 @@ def analyze_dataset_lengths():
         if sample is None:
             continue
 
-        # a. 获取 Pocket Embedding 长度
         if 'pdb_embedding' in sample and sample['pdb_embedding'] is not None:
             # 形状通常是 (sequence_length, embedding_dim)
             pocket_lengths.append(sample['pdb_embedding'].shape[0])
 
-        # b. 获取 SELFIES token 长度
-        # 你的代码为每个样本生成了 'selfies' 和 'selfies2'
         selfies1 = sample.get('selfies', '')
         selfies2 = sample.get('selfies2', '')
 
-        # 使用分词器的 `encode` 方法可以准确计算出token数量，包含了特殊token
         len1 = len(tokenizer.encode(selfies1)) if selfies1 else 0
         len2 = len(tokenizer.encode(selfies2)) if selfies2 else 0
 
-        # 我们关心的是两者中更长的那一个，因为它有被截断的风险
         selfies_lengths.append(max(len1, len2))
 
     print("长度计算完成。")

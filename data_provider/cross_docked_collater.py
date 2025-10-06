@@ -21,38 +21,29 @@ class LMCollater:
 
     def __call__(self, batch):
         batch = [item for item in batch if item is not None]
-
         if not batch:
-            log_message = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] --- CRITICAL DIAGNOSIS (Worker PID: {self.worker_id}) ---\n" \
-                          f"The 'if not batch:' check was successfully triggered.\n" \
-                          f"This proves the LATEST version of LMCollater is running and has correctly detected an empty batch.\n" \
-                          f"Returning (None, ...) to skip this batch.\n\n"
+            return None, None, None, None, None
 
-            print("\n" + "*"*80, flush=True)
-            print(log_message, flush=True)
-            print("*"*80 + "\n", flush=True)
-
-            with open("DIAGNOSIS_PROOF.log", "a") as f:
-                f.write(log_message)
-
-            return None, None, None, None, None, None
-
-        selfies = [item['selfies'] for item in batch]
-        selfies2 = [item['selfies2'] for item in batch]
         pockets = [item['pdb_embedding'] for item in batch]
         ground_truth_mols = [item['rdmol'] for item in batch]
         pocket_paths = [item['pdb_path'] for item in batch]
 
-        selfies_batch = self.tokenizer(selfies, padding='max_length', return_tensors='pt',
-                                    max_length=self.max_sf_tokens, truncation=True, add_special_tokens=True)
-        selfies2_batch = self.tokenizer(selfies2, padding='max_length', return_tensors='pt',
-                                        max_length=self.max_sf_tokens, truncation=True, add_special_tokens=True)
+        num_augmentations = len(batch[0]['selfies_list'])
+
+        list_of_selfies_batches = []
+        eos_token = self.tokenizer.eos_token
+
+        for i in range(num_augmentations):
+            current_aug_selfies = [item['selfies_list'][i] for item in batch]
+
+            selfies_with_eos = [s + eos_token for s in current_aug_selfies]
+            selfies_batch_i = self.tokenizer(selfies_with_eos, padding='max_length', return_tensors='pt',
+                                           max_length=self.max_sf_tokens, truncation=True, add_special_tokens=False)
+            list_of_selfies_batches.append(selfies_batch_i)
 
         pocket_embs, pocket_mask = self.prepare_inputs_for_causal_lm_left_pad(pockets, self.max_pocket_tokens)
 
-        return selfies_batch, selfies2_batch, pocket_embs, pocket_mask, ground_truth_mols, pocket_paths
-
-
+        return list_of_selfies_batches, pocket_embs, pocket_mask, ground_truth_mols, pocket_paths
 class LMInferCollater:
     def __init__(self, tokenizer, max_pocket_tokens):
         self.tokenizer = tokenizer

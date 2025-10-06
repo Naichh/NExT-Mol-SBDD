@@ -11,6 +11,7 @@ export NCCL_SOCKET_IFNAME=ib1
 export NCCL_IB_HCA=mlx5_3
 export PL_TORCH_DISTRIBUTED_BACKEND_TIMEOUT=3600
 export TOKENIZERS_PARALLELISM=false
+export WANDB_DIR=/data/share/liuzhiyuan/nai/NExT-Mol/wandb_temp
 ulimit -n 65535
 
 # --- 1. 工作目录与环境配置 ---
@@ -24,7 +25,7 @@ echo "已激活Conda环境: $CONDA_DEFAULT_ENV"
 
 
 # --- 2. 数据存储目录 ---
-CKPT_PATH="/data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20250919_163811/last.ckpt"
+CKPT_PATH="/data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251004_145854/epoch=09.ckpt"
 
 SBDD_DATA_ROOT="/data/share/liuzhiyuan/nai/NExT-Mol/datasets/sbdd/crossdocked_pocket"
 SPLIT_FILE="${SBDD_DATA_ROOT}/split_by_name.pt"
@@ -61,7 +62,7 @@ echo "模型将保存在: ${CHECKPOINTS_DIR}"
 # 确保输出目录存在
 
 
-torchrun --nproc_per_node=2 --master_port=55369  llm_train_cross_docked.py \
+torchrun --nproc_per_node=2 --master_port=55355  llm_train_cross_docked.py \
     --output_dir "$CHECKPOINTS_DIR" \
     --filename "$RUN_NAME" \
     --deepspeed_config "$DS_CONFIG" \
@@ -69,34 +70,34 @@ torchrun --nproc_per_node=2 --master_port=55369  llm_train_cross_docked.py \
     --devices 'auto' \
     --mode 'train' \
     --max_epochs 300 \
-    --batch_size 48 \
+    --batch_size 88\
     --eval_batch_size 32\
     --temperature 0.2 \
     --do_sample \
-    --save_every_n_epochs 6 \
+    --save_every_n_epochs 5 \
     --check_val_every_n_epoch 1 \
     --dataset_root "$SBDD_DATA_ROOT" \
     --split_file "$SPLIT_FILE" \
     --num_output_2d 30 \
-    --num_output_3d 5 \
+    --num_output_3d 1 \
     --num_beams 1 \
-    --num_workers 0 \
+    --num_workers 2 \
     --epoch_without_eval 1 \
     --eval_2d_every_n_epochs 1 \
     --eval_3d_every_n_epochs 200 \
-    --max_sf_tokens 128 \
+    --max_sf_tokens 192 \
     --max_pocket_tokens 128 \
     --llm_model "$LLM_MODEL_ID" \
     --llm_tune 'full' \
     --accelerator 'gpu' \
     --precision 'bf16-mixed' \
     --accumulate_grad_batches 1\
-    --init_lr 1e-5 \
-    --min_lr 1e-6 \
-    --unfreeze_epoch 13 \
-    --llm_target_lr 1e-7 \
-    --llm_warmup_steps 500\
-    --warmup_steps 2500 \
+    --init_lr 5e-5 \
+    --min_lr 1e-7 \
+    --unfreeze_epoch 10 \
+    --llm_target_lr 5e-7 \
+    --llm_warmup_steps 1000\
+    --warmup_steps 1000 \
     --gradient_clip_val 1.0 \
     --attention_dropout 0.1 \
     --weight_decay 0.02 \
@@ -105,9 +106,3 @@ torchrun --nproc_per_node=2 --master_port=55369  llm_train_cross_docked.py \
     2> "${RESULTS_DIR}/training_err.log"
 
 echo "SBDD Stage 1 运行执行完毕。"
-
-#    --llm_target_lr 1e-7 \
-#decay_projection_lr
-#    --ckpt_path "$CKPT_PATH" \
-# --llm_warmup_steps 500\
-#--projection_dropout 0.1 \

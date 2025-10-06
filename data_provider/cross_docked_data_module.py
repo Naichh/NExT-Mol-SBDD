@@ -37,10 +37,6 @@ class PocketLigandDataModule(pl.LightningDataModule):
         self.cached_data_path = os.path.join(self.cache_dir, "all_data_stage1_cache.pt")
 
     def prepare_data(self):
-        """
-        这个方法只在Rank 0上执行一次。
-        它的任务是检查缓存是否存在，如果不存在，就创建它。
-        """
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir, exist_ok=True)
             print(f"INFO: Created temporary cache directory: {self.cache_dir}")
@@ -52,46 +48,31 @@ class PocketLigandDataModule(pl.LightningDataModule):
 
         print("INFO: 未找到缓存文件，开始在Rank 0上进行一次性数据预加载...")
 
-        # 1. 创建一个临时的、仅用于加载的Dataset实例
         full_dataset_on_disk = PocketLigandPairDataset(self.dataset_root)
 
-        # 2. 执行内存加载
         print(f"INFO: Pre-loading all {len(full_dataset_on_disk)} samples into RAM. This may take a while...")
         data_cache = {}
-        # 使用 with open 确保文件句柄被正确关闭
         with open(full_dataset_on_disk.index_path, 'rb') as f:
             index_list = pickle.load(f)
 
         for i in tqdm(range(len(index_list)), desc="Caching data into RAM on Rank 0"):
-            # 直接调用 __getitem__ 方法加载数据
             sample = full_dataset_on_disk[i]
             if sample is not None:
-                # 使用原始的索引元组作为键
                 original_idx_tuple = index_list[i]
                 data_cache[original_idx_tuple] = sample
 
-        # 3. 将加载好的数据保存到磁盘，供所有进程使用
         print(f"INFO: 数据缓存完成，正在保存到 '{self.cached_data_path}'...")
         torch.save(data_cache, self.cached_data_path)
         print("INFO: 缓存文件保存成功。")
 
-    # <<< 核心修改点 #2: 简化 setup 方法 >>>
     def setup(self, stage=None):
-        """
-        这个方法会在所有Rank上执行。
-        它的任务是加载已准备好的数据，并创建训练/测试集。
-        """
         print(f"INFO: Rank {self.trainer.global_rank} 正在设置 DataModule...")
 
-        # 1. 从磁盘加载已由Rank 0准备好的缓存文件
-        # PyTorch Lightning会自动确保在执行setup之前，prepare_data已经完成
         print(f"INFO: Rank {self.trainer.global_rank} is loading data from '{self.cached_data_path}'")
         full_data_cache = torch.load(self.cached_data_path, map_location='cpu')
 
-        # 2. 创建一个在RAM模式下运行的Dataset实例
         cached_dataset = PocketLigandPairDataset(self.dataset_root, data_cache=full_data_cache)
-
-        # 3. 后续的逻辑几乎不变
+        index_to_original_key_map = cached_dataset.index
         split = torch.load(self.split_file)
 
         print("INFO: Building fast lookup map...")
@@ -117,15 +98,16 @@ class PocketLigandDataModule(pl.LightningDataModule):
         print("INFO: Efficiently extracting train molecules by index...")
         self.train_rdmols = []
         for idx in tqdm(train_indices, desc="Extracting train rdmol"):
-            sample = cached_dataset[idx]
+            original_key = index_to_original_key_map[idx]
+            sample = full_data_cache[original_key]
             if sample is not None and 'rdmol' in sample:
                 self.train_rdmols.append(sample['rdmol'])
 
-
-        print("INFO: Efficiently extracting test molecules by index...")
+        print("INFO: Efficiently extracting test molecules DIRECTLY from cache...")
         self.test_rdmols = []
         for idx in tqdm(test_indices, desc="Extracting test rdmol"):
-            sample = cached_dataset[idx]
+            original_key = index_to_original_key_map[idx]
+            sample = full_data_cache[original_key]
             if sample is not None and 'rdmol' in sample:
                 self.test_rdmols.append(sample['rdmol'])
         self.get_moses_metrics = get_moses_metrics(self.test_rdmols, 1)
@@ -157,7 +139,7 @@ class PocketLigandDataModule(pl.LightningDataModule):
         dataloader_kwargs = {
             'batch_size': self.eval_batch_size,
             'shuffle': False,
-            'num_workers': self.num_workers,
+            'num_workers': 0,
             'collate_fn': LMCollater(
                 tokenizer=self.tokenizer,
                 max_sf_tokens=self.max_sf_tokens,
@@ -167,10 +149,10 @@ class PocketLigandDataModule(pl.LightningDataModule):
             'pin_memory': True,
         }
 
-        if self.num_workers > 0:
-            dataloader_kwargs['multiprocessing_context'] = 'spawn'
-            # persistent_workers is often set to True here as well for speed
-            dataloader_kwargs['persistent_workers'] = True
+        # if self.num_workers > 0:
+        #     dataloader_kwargs['multiprocessing_context'] = 'spawn'
+        #     # persistent_workers is often set to True here as well for speed
+        #     dataloader_kwargs['persistent_workers'] = True
 
         return DataLoader(self.test_dataset, **dataloader_kwargs)
 

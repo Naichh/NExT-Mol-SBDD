@@ -2,6 +2,7 @@ import os
 import argparse
 import torch
 import warnings
+import sys
 import lightning as L
 import lightning.pytorch.callbacks as plc
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
@@ -9,6 +10,8 @@ import multiprocessing as mp
 from model.llm_cross_docked_rewrite import LLMPL
 from data_provider.cross_docked_data_module import PocketLigandDataModule
 import traceback
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.warning')
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -16,10 +19,7 @@ warnings.filterwarnings('ignore', category=UserWarning, message='TypedStorage is
 torch.set_float32_matmul_precision('medium')
 from datetime import timedelta
 class LoraSaveCallback(plc.Callback):
-    """
-    一个更健壮的回调，它通过挂钩到 on_save_checkpoint，
-    确保只有在保存了epoch检查点时，才独立保存LoRA适配器。
-    """
+
     def on_save_checkpoint(self, trainer, pl_module, checkpoint):
         # 只在主进程(rank 0)执行保存操作
         if not trainer.is_global_zero:
@@ -164,9 +164,9 @@ def main(args):
         check_val_every_n_epoch=args.check_val_every_n_epoch,
         log_every_n_steps=20,
         callbacks=callbacks,
-        num_sanity_val_steps=0, 
+        num_sanity_val_steps=0,
         logger=[csv_logger, wandb_logger],
-        gradient_clip_val=args.gradient_clip_val
+        #gradient_clip_val=args.gradient_clip_val
     )
     print(f"The Trainer has been prepared!")
 
@@ -200,6 +200,8 @@ def main(args):
             trainer.validate(model=model, datamodule=datamodule, ckpt_path=args.ckpt_path)
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
+    print("INFO: Script finished successfully. Exiting.")
+    sys.exit(0)
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     parser = argparse.ArgumentParser()

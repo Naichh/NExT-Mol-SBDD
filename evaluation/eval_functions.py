@@ -138,6 +138,7 @@ def run_full_evaluation(grouped_mols):
 
     # Calculate the number of workers, leaving one core for the main process and OS
     num_workers = max(1, cpu_cores - 1)
+    #num_workers=29
     print(f"INFO: Setting num_workers for docking to {num_workers}.")
 
 
@@ -343,17 +344,6 @@ def run_full_evaluation(grouped_mols):
 
 
 def SBDD_validation(generated_mols, ground_truth_mols):
-    """
-    计算一系列SBDD相关的2D相似度指标。
-
-    Args:
-        generated_mols (list): RDKit Mol对象的列表，由模型生成。
-        ground_truth_mols (list): RDKit Mol对象的列表，作为参考标准。
-
-    Returns:
-        dict: 包含所有指标平均值的字典。
-    """
-    # --- 辅助函数定义 ---
     def get_exact_match(mol_gen, mol_gt):
         if not mol_gen or not mol_gt: return 0
         smiles_gen_canon = Chem.MolToSmiles(mol_gen, canonical=True)
@@ -361,9 +351,9 @@ def SBDD_validation(generated_mols, ground_truth_mols):
         return 1 if smiles_gen_canon == smiles_gt_canon else 0
 
     def get_levenshtein_distance(mol_gen, mol_gt):
-        if not mol_gen or not mol_gt: return 1000 # 返回一个较大的惩罚值
-        smiles_gen = Chem.MolToSmiles(mol_gen)
-        smiles_gt = Chem.MolToSmiles(mol_gt)
+        if not mol_gen or not mol_gt: return 1000
+        smiles_gen = Chem.MolToSmiles(mol_gen, canonical=True)
+        smiles_gt = Chem.MolToSmiles(mol_gt, canonical=True)
         return Levenshtein.distance(smiles_gen, smiles_gt)
 
     def get_maccs_fts(mol_gen, mol_gt):

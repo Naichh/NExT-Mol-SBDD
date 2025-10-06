@@ -17,7 +17,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 sync.sh
-
+sampled_mol/
 # ===================================================================
 # IDEs and Editors
 # 忽略您和团队成员可能使用的各种编辑器的配置，这些都是个人化的
@@ -84,5 +84,3 @@ testscripts/
 secrets.yml
 config.local.ini
 local_settings.py
-
-

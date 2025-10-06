@@ -81,7 +81,7 @@ torchrun --nproc_per_node=4 --master_port=54345  llm_train_cross_docked.py \
     --num_workers 0 \
     --eval_2d_every_n_epochs 1 \
     --eval_3d_every_n_epochs 200 \
-    --max_sf_tokens 128 \
+    --max_sf_tokens 192 \
     --max_pocket_tokens 128 \
     --llm_model "$LLM_MODEL_ID" \
     --accelerator 'gpu' \

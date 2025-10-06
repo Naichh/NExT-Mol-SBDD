@@ -1,0 +1,43 @@
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 15: ulimit: open files: cannot modify limit: Operation not permitted
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251004_145854/epoch=09.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_151825/sbdd_full-finetune_20251006_151825/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_151825/sbdd_full-finetune_20251006_151825/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251006_151825
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 105: 13577 Killed                  torchrun --nproc_per_node=1 --master_port=55375 llm_train_cross_docked.py --output_dir "$CHECKPOINTS_DIR" --filename "$RUN_NAME" --ckpt_path /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251005_124151/epoch=39.ckpt --deepspeed_config "$DS_CONFIG" --seed 42 --devices 'auto' --mode 'eval' --max_epochs 300 --batch_size 96 --eval_batch_size 32 --temperature 0.2 --do_sample --save_every_n_epochs 5 --check_val_every_n_epoch 1 --dataset_root "$SBDD_DATA_ROOT" --split_file "$SPLIT_FILE" --num_output_2d 100 --num_output_3d 100 --num_beams 1 --num_workers 8 --epoch_without_eval 1 --eval_2d_every_n_epochs 1 --eval_3d_every_n_epochs 1 --max_sf_tokens 192 --max_pocket_tokens 128 --llm_model "$LLM_MODEL_ID" --llm_tune 'full' --accelerator 'gpu' --precision 'bf16-mixed' --accumulate_grad_batches 1 --init_lr 5e-5 --min_lr 1e-7 --unfreeze_epoch 10 --llm_target_lr 5e-7 --llm_warmup_steps 1000 --warmup_steps 1000 --gradient_clip_val 1.0 --attention_dropout 0.1 --weight_decay 0.02 --strategy_name 'deepspeed' > "${RESULTS_DIR}/training_out.log" 2> "${RESULTS_DIR}/training_err.log"
+SBDD Stage 1 运行执行完毕。
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 15: ulimit: open files: cannot modify limit: Operation not permitted
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251004_145854/epoch=09.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_151841/sbdd_full-finetune_20251006_151841/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_151841/sbdd_full-finetune_20251006_151841/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251006_151841
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 105: 16310 Killed                  torchrun --nproc_per_node=1 --master_port=55375 llm_train_cross_docked.py --output_dir "$CHECKPOINTS_DIR" --filename "$RUN_NAME" --ckpt_path /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251005_124151/epoch=39.ckpt --deepspeed_config "$DS_CONFIG" --seed 42 --devices 'auto' --mode 'eval' --max_epochs 300 --batch_size 96 --eval_batch_size 32 --temperature 0.2 --do_sample --save_every_n_epochs 5 --check_val_every_n_epoch 1 --dataset_root "$SBDD_DATA_ROOT" --split_file "$SPLIT_FILE" --num_output_2d 100 --num_output_3d 100 --num_beams 1 --num_workers 8 --epoch_without_eval 1 --eval_2d_every_n_epochs 1 --eval_3d_every_n_epochs 1 --max_sf_tokens 192 --max_pocket_tokens 128 --llm_model "$LLM_MODEL_ID" --llm_tune 'full' --accelerator 'gpu' --precision 'bf16-mixed' --accumulate_grad_batches 1 --init_lr 5e-5 --min_lr 1e-7 --unfreeze_epoch 10 --llm_target_lr 5e-7 --llm_warmup_steps 1000 --warmup_steps 1000 --gradient_clip_val 1.0 --attention_dropout 0.1 --weight_decay 0.02 --strategy_name 'deepspeed' > "${RESULTS_DIR}/training_out.log" 2> "${RESULTS_DIR}/training_err.log"
+SBDD Stage 1 运行执行完毕。
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 15: ulimit: open files: cannot modify limit: Operation not permitted
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251004_145854/epoch=09.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_152605/sbdd_full-finetune_20251006_152605/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_152605/sbdd_full-finetune_20251006_152605/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251006_152605
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 117: unexpected EOF while looking for matching `''
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 122: syntax error: unexpected end of file
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/scripts/run_stage1_eval.sh: line 15: ulimit: open files: cannot modify limit: Operation not permitted
+当前工作目录: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol
+已激活Conda环境: nextmol
+将从检查点恢复训练: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251004_145854/epoch=09.ckpt
+开始执行SBDD Stage 1: 全量微调...
+标准输出日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_202812/sbdd_full-finetune_20251006_202812/training_out.log
+错误日志将保存在: /mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/results/evaluation/stage1/20251006_202812/sbdd_full-finetune_20251006_202812/training_err.log
+模型将保存在: /data/share/liuzhiyuan/nai/NExT-Mol/all_checkpoints/stage1/fft/sbdd_full-finetune_20251006_202812
+========================================================================
+INFO: 生成的分子任务文件将保存在以下目录:
+/mnt/rna01/liuzhiyuan/zyliu/nai/NExT-Mol/sampled_mol/_
+========================================================================
+SBDD Stage 1 运行执行完毕。

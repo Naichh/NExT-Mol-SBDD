@@ -35,80 +35,71 @@ def unrestricted_random_smiles(smiles, addHs=False):
         except:
             continue
 
-
 class PocketLigandPairDataset(Dataset):
-    # <<< 修改点 #1: 在 __init__ 方法中增加一个参数 `data_cache` >>>
     def __init__(self, raw_path, rand_smiles='restricted', addHs=False, data_cache=None):
         super().__init__()
         self.raw_path = raw_path.rstrip('/')
         self.index_path = os.path.join(self.raw_path, 'index.pkl')
         self.rand_smiles = rand_smiles
         self.addHs = addHs
-
-        # <<< 新增：将缓存保存为类属性 >>>
         self.data_cache = data_cache
+        self.num_augmentations = 1
 
-        # 如果没有提供缓存，才加载索引文件（用于预加载阶段）
         if self.data_cache is None:
-            print(f"--> [Disk Mode] 正在从 '{self.index_path}' 加载主索引文件...")
+            print(f"--> [Disk Mode] Loading main index from '{self.index_path}'...")
             with open(self.index_path, 'rb') as f:
                 self.index = pickle.load(f)
-            print(f"--> [Disk Mode] 主索引加载完成，共找到 {len(self.index)} 个样本。")
+            print(f"--> [Disk Mode] Index loaded with {len(self.index)} samples.")
         else:
             print("--> [RAM Mode] Dataset is running in RAM-cached mode.")
-            # 在缓存模式下，长度由缓存的键（也就是原始索引）决定
-            # 为了能通过 Subset 访问，我们仍然需要一个索引列表
             self.index = list(self.data_cache.keys())
-
 
     def __len__(self):
         return len(self.index)
 
-    # 最终确认版的 __getitem__ 函数
     def __getitem__(self, idx):
         try:
-            # --- 缓存逻辑被包裹在try内部 ---
             if self.data_cache is not None:
+                # --- RAM Mode (for training/validation) ---
                 original_idx = self.index[idx]
-                return self.data_cache[original_idx]
+                cached_item = self.data_cache[original_idx]
+                smiles = cached_item['smiles']
 
-            # --- 磁盘读取逻辑 ---
-            pocket_fn, ligand_fn, protein_fn, rmsd = self.index[idx]
-            pocket_path = os.path.join(self.raw_path, pocket_fn)
-            ligand_path = os.path.join(self.raw_path, ligand_fn)
-            pt_embed_path = pocket_path.replace('.pdb', '.pt')
+                # Perform on-the-fly augmentation
+                selfies_list = []
+                for _ in range(self.num_augmentations):
+                    rand_smiles = restricted_random_smiles(smiles, self.addHs)
+                    selfies_list.append(sf.encoder(rand_smiles))
 
-            embedding = torch.load(pt_embed_path, map_location='cpu',weights_only=True)
+                # Return a complete sample with new augmentations
+                return {
+                    **cached_item,
+                    'selfies_list': selfies_list,
+                }
+            else:
+                # --- Disk Mode (for prepare_data caching) ---
+                pocket_fn, ligand_fn, protein_fn, rmsd = self.index[idx]
+                pocket_path = os.path.join(self.raw_path, pocket_fn)
+                ligand_path = os.path.join(self.raw_path, ligand_fn)
+                pt_embed_path = pocket_path.replace('.pdb', '.pt')
 
-            mol = Chem.SDMolSupplier(ligand_path, removeHs=False, sanitize=True)[0]
-            if mol is None:
-                return None
+                embedding = torch.load(pt_embed_path, map_location='cpu', weights_only=True)
+                mol = Chem.SDMolSupplier(ligand_path, removeHs=False, sanitize=True)[0]
+                if mol is None: return None
 
-            smiles = Chem.MolToSmiles(mol)
+                smiles = Chem.MolToSmiles(mol)
 
-            # 假设您的随机化和selfies转换函数在这里
-            smiles1 = restricted_random_smiles(smiles, self.addHs)
-            smiles2 = restricted_random_smiles(smiles, self.addHs)
-            selfies1 = sf.encoder(smiles1)
-            selfies2 = sf.encoder(smiles2)
-
-            return {
-                'pdb_path': pocket_fn,
-                'pdb_embedding': embedding.clone().detach(),
-                'sdf_path': ligand_path,
-                'selfies': selfies1,
-                'selfies2': selfies2,
-                'rmsd': torch.tensor(rmsd, dtype=torch.float),
-                'rdmol': mol
-            }
-
-        except FileNotFoundError:
-            return None # 优雅地处理文件缺失
-        except Exception as e:
-            # 捕获其他任何可能的错误，防止worker崩溃
-            # print(f"\n[!] 在 __getitem__ 中发生未知错误，跳过样本。错误: {e}")
+                # Return the semi-processed data to be cached
+                return {
+                    'pdb_path': pocket_fn,
+                    'pdb_embedding': embedding.clone().detach(),
+                    'sdf_path': ligand_path,
+                    'smiles': smiles, # Cache the original smiles
+                    'rmsd': torch.tensor(rmsd, dtype=torch.float),
+                    'rdmol': mol
+                }
+        except Exception:
             return None
-
 
 
 

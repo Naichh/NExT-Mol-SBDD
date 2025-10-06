@@ -152,30 +152,30 @@ class LLMPL(L.LightningModule):
                     print(f"Projection adapter has {proj_params/1e6:.2f}M trainable parameters.")
 
 
-    def on_train_batch_start(self, batch, batch_idx):
-        if self.is_in_llm_warmup:
-            optimizer = self.trainer.optimizers[0]
+    # def on_train_batch_start(self, batch, batch_idx):
+    #     if self.is_in_llm_warmup:
+    #         optimizer = self.trainer.optimizers[0]
 
 
-            start_lr = self.llm_target_lr * 0.01
-            current_step = self.llm_warmup_step_count
-            total_steps = self.llm_warmup_steps
+    #         start_lr = self.llm_target_lr * 0.01
+    #         current_step = self.llm_warmup_step_count
+    #         total_steps = self.llm_warmup_steps
 
-            lr_ratio = current_step / total_steps
-            current_lr = start_lr + (self.llm_target_lr - start_lr) * lr_ratio
+    #         lr_ratio = current_step / total_steps
+    #         current_lr = start_lr + (self.llm_target_lr - start_lr) * lr_ratio
 
 
-            optimizer.param_groups[0]['lr'] = current_lr
+    #         optimizer.param_groups[0]['lr'] = current_lr
 
-            self.llm_warmup_step_count += 1
+    #         self.llm_warmup_step_count += 1
 
-            if self.llm_warmup_step_count >= self.llm_warmup_steps:
-                self.is_in_llm_warmup = False
-                optimizer.param_groups[0]['lr'] = self.llm_target_lr
-                print("\n" + "="*80)
-                print("INFO: LLM re-warmup finished. Handing LR control back to the main scheduler.")
-                print(f"Final LLM LR set to: {optimizer.param_groups[0]['lr']}")
-                print("="*80 + "\n")
+    #         if self.llm_warmup_step_count >= self.llm_warmup_steps:
+    #             self.is_in_llm_warmup = False
+    #             optimizer.param_groups[0]['lr'] = self.llm_target_lr
+    #             print("\n" + "="*80)
+    #             print("INFO: LLM re-warmup finished. Handing LR control back to the main scheduler.")
+    #             print(f"Final LLM LR set to: {optimizer.param_groups[0]['lr']}")
+    #             print("="*80 + "\n")
 
 
 
@@ -332,6 +332,7 @@ class LLMPL(L.LightningModule):
         self.llm_warmup_step_count = 0
         self.llm_target_lr = args.llm_target_lr
         self.adapter_lr_adjusted = False
+        self.automatic_optimization = False
         ## init llm
         self.llm_model = self.init_llm(args)
         if tokenizer is None:
@@ -352,11 +353,19 @@ class LLMPL(L.LightningModule):
         print(f"The model's hidden size is: {self.hidden_size}")
 
         self.embedding_norm = torch.nn.LayerNorm(1536,elementwise_affine=True)
-        self.projection = torch.nn.Sequential(
-        torch.nn.Linear(1536, 1024),
-        torch.nn.GELU(),
-        torch.nn.Linear(1024, self.hidden_size)
-        )
+
+        if self.args.old_ckpt:
+            self.projection = torch.nn.Sequential(
+            torch.nn.Linear(1536, 1024),
+            torch.nn.GELU(),
+            torch.nn.Linear(1024, self.hidden_size)
+            )
+        else:
+            self.projection = torch.nn.Sequential(
+            torch.nn.Linear(1536, 1536*2),
+            torch.nn.GELU(),
+            torch.nn.Linear(1536*2, self.hidden_size)
+            )
         self.post_projection_norm = torch.nn.LayerNorm(self.llm_model.config.hidden_size,elementwise_affine=True)
 
                # --- 应用权重初始化 ---
@@ -399,20 +408,14 @@ class LLMPL(L.LightningModule):
             print(f"--- [INFO] Calculated warmup steps: {self.warmup_steps} ---")
 
     def configure_optimizers(self):
-
         print(f"INFO: Configuring optimizer with differential learning rates...")
-
-
-        # 定义一个列表来存放不同参数组的配置
         param_groups = []
-
         llm_params = {
             'params': self.llm_model.parameters(),
             'lr': self.llm_target_lr,
             'weight_decay': self.args.weight_decay
         }
         param_groups.append(llm_params)
-
         adapter_params = {
             'params': [
                 *self.embedding_norm.parameters(),
@@ -423,11 +426,9 @@ class LLMPL(L.LightningModule):
             'weight_decay': self.args.weight_decay
         }
         param_groups.append(adapter_params)
-
         optimizer = optim.AdamW(
             param_groups
         )
-
         if self.args.scheduler == 'linear_warmup_cosine_lr':
             warmup_scheduler = LinearLR(
                 optimizer,
@@ -445,8 +446,6 @@ class LLMPL(L.LightningModule):
                 schedulers=[warmup_scheduler, main_scheduler],
                 milestones=[self.warmup_steps]
             )
-
-
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {
@@ -509,78 +508,61 @@ class LLMPL(L.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
+        optimizer = self.optimizers()
+        scheduler = self.lr_schedulers()
+        optimizer.zero_grad()
         if batch[0] is None:
-            return None
-        # if self.scheduler:
-        #     self.scheduler.step(self.trainer.global_step)
+            return
 
-        selfies_batch, selfies2_batch, pockets_emb, pock_attn_mask, _, _ = batch
-        batch_size = selfies_batch.input_ids.shape[0]
+        list_of_selfies_batches, pockets_emb, pock_attn_mask, _, _ = batch
+        total_loss_for_logging = 0.0
+        num_augmentations = len(list_of_selfies_batches)
 
-        # --- Standard Generative Loss (Default Behavior) ---
+        for selfies_batch in list_of_selfies_batches:
+            loss = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
 
-        lm_loss0 = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
-        lm_loss1 = self.forward(selfies2_batch, pockets_emb, pock_attn_mask)
-        loss = (lm_loss0 + lm_loss1) / 2
+            loss = loss / num_augmentations
 
-        self.log('train_loss', loss, sync_dist=True, batch_size=batch_size)
+            self.manual_backward(loss)
+
+            total_loss_for_logging += loss.detach()
+
+        self.clip_gradients(optimizer, gradient_clip_val=self.args.gradient_clip_val, gradient_clip_algorithm="norm")
 
 
-        optimizer = self.trainer.optimizers[0]
+        optimizer.step()
+        scheduler.step()
+        original_batch_size = pockets_emb.shape[0]
+        self.log('train_loss', total_loss_for_logging, sync_dist=True, batch_size=original_batch_size)
 
-        # Log the learning rate for the LLM parameter group (index 0)
-        # Renamed to 'lr_llm' for clarity
-        self.log('lr/lr_llm', optimizer.param_groups[0]['lr'], sync_dist=True, batch_size=batch_size)
-
-        # Check if the second parameter group (adapter) exists and log its LR
+        self.log('lr/lr_llm', optimizer.param_groups[0]['lr'], sync_dist=True, batch_size=original_batch_size)
         if len(optimizer.param_groups) > 1:
-            # Log the learning rate for the Adapter parameter group (index 1)
-            self.log('lr/lr_adapter', optimizer.param_groups[1]['lr'], sync_dist=True, batch_size=batch_size)
+            self.log('lr/lr_adapter', optimizer.param_groups[1]['lr'], sync_dist=True, batch_size=original_batch_size)
 
-
-
-        # if self.global_step % 50 == 0:
-        #     with torch.no_grad():
-        #         # 新结构中，线性层分别在索引 0 和 3
-        #         first_linear_layer_norm = torch.linalg.norm(self.projection[0].weight)
-        #         second_linear_layer_norm = torch.linalg.norm(self.projection[3].weight)
-        #         self.log('debug/proj_norm_L1', first_linear_layer_norm)
-        #         self.log('debug/proj_norm_L2', second_linear_layer_norm)
-
-        return loss
 
     @torch.no_grad()
     def on_validation_epoch_start(self):
         self.validation_outputs=[]
         self.sampled_seq = []
 
-    # In LLMPL class
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        # [保留] 处理空 batch
+        if batch[0] is None:
+            return
 
-        if hasattr(self, 'global_rank'):
-            print(f">>> [DEBUG] Rank {self.global_rank}: Entering validation_step for batch_idx {batch_idx}.")
-        else:
-            print(f">>> [DEBUG] Entering validation_step for batch_idx {batch_idx}.")
-        selfies_batch, selfies2_batch, pockets_emb, pock_attn_mask, ground_truth_mols, pocket_paths = batch
+        # [修改] 正确解包新的 Collater 输出（包含一个batch列表）
+        list_of_selfies_batches, pockets_emb, pock_attn_mask, ground_truth_mols, pocket_paths = batch
 
-
-
-        # --- 1. 深入的诊断逻辑 (仅在第一个batch执行) ---
         if self.trainer.is_global_zero and batch_idx == 0:
             print("\n" + "="*80)
-            print(f"|  <<<<<<<<<<<<<<<<< DIAGNOSTIC REPORT (Epoch: {self.current_epoch}) >>>>>>>>>>>>>>>>>  |")
+            print(f"|          <<<<<<<<< DIAGNOSTIC REPORT (Epoch: {self.current_epoch}) >>>>>>>>>>>          |")
             print("="*80)
-
             normalized_pockets_emb_before = self.embedding_norm(pockets_emb)
-
             avg_emb_before = torch.mean(normalized_pockets_emb_before, dim=1)
-            # Normalize for cosine similarity calculation
             avg_emb_before_norm = torch.nn.functional.normalize(avg_emb_before, p=2, dim=1)
             similarity_matrix_before = torch.matmul(avg_emb_before_norm, avg_emb_before_norm.T)
-
             mask = torch.triu(torch.ones_like(similarity_matrix_before), diagonal=1).bool()
-
             if mask.sum() > 0:
                 avg_sim_before = similarity_matrix_before[mask].mean().item()
                 max_sim_before = similarity_matrix_before[mask].max().item()
@@ -590,16 +572,12 @@ class LLMPL(L.LightningModule):
                 print("."*80)
                 self.log('debug/Avg_Cosine_Similarity_of_Input_Embeds', avg_sim_before, rank_zero_only=True)
                 self.log('debug/Max_Cosine_Similarity_of_Input_Embeds', max_sim_before, rank_zero_only=True)
-            # --- 诊断 Part B: Projection 之后的表征相似度 ---
+
             projected_emb = self.projection(normalized_pockets_emb_before)
             prompt_embeds_after = self.post_projection_norm(projected_emb)
-
-            # [--- 代码修正 ---]
             avg_emb_after = torch.mean(prompt_embeds_after, dim=1)
             avg_emb_after_norm = torch.nn.functional.normalize(avg_emb_after, p=2, dim=1)
             similarity_matrix_after = torch.matmul(avg_emb_after_norm, avg_emb_after_norm.T)
-            # [--- 代码修正结束 ---]
-
             if mask.sum() > 0:
                 avg_sim_after = similarity_matrix_after[mask].mean().item()
                 max_sim_after = similarity_matrix_after[mask].max().item()
@@ -609,42 +587,29 @@ class LLMPL(L.LightningModule):
                 print("."*80)
                 self.log('debug/Avg_Cosine_Similarity_of_Output_Embeds', avg_sim_after, rank_zero_only=True)
                 self.log('debug/Max_Cosine_Similarity_of_Output_Embeds', max_sim_after, rank_zero_only=True)
-            # --- 诊断 Part C: Logits 检查 ---
+
             prompt_embeds_for_logits = prompt_embeds_after
             outputs = self.llm_model(inputs_embeds=prompt_embeds_for_logits, attention_mask=pock_attn_mask, return_dict=True)
             self.debug_inspect_logits(logits=outputs.logits, prompt_length=prompt_embeds_for_logits.shape[1],
                                       epoch=self.current_epoch, step=self.trainer.global_step, batch_idx=batch_idx)
-
-            print(f"|  <<<<<<<<<<<<<<<<<<<<<<<< END OF REPORT >>>>>>>>>>>>>>>>>>>>>>>  |")
+            print(f"|          <<<<<<<<<<<<<<<<< END OF REPORT >>>>>>>>>>>>>>>>>>>>>          |")
             print("="*80 + "\n")
 
-
-
-        # --- 1. 计算并记录 loss ---
-        lm_loss0 = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
-        lm_loss1 = self.forward(selfies2_batch, pockets_emb, pock_attn_mask)
-        loss = (lm_loss0 + lm_loss1) / 2
-        self.log('val_loss', loss, sync_dist=True, batch_size=pockets_emb.shape[0])
-
-
+        total_loss = 0.0
+        for selfies_batch in list_of_selfies_batches:
+            loss = self.forward(selfies_batch, pockets_emb, pock_attn_mask)
+            total_loss += loss.detach()
+        avg_loss = total_loss / len(list_of_selfies_batches)
+        self.log('val_loss', avg_loss, sync_dist=True, batch_size=pockets_emb.shape[0])
 
         is_2d_eval_epoch = (self.current_epoch + 1) % self.args.eval_2d_every_n_epochs == 0
-        is_3d_eval_epoch = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
-        if not is_2d_eval_epoch and not is_3d_eval_epoch:
-            if self.trainer.is_global_zero:
-                print(f"\n--- [INFO] Epoch {self.current_epoch}: Skipping molecule generation as per schedule. ---")
+        if not is_2d_eval_epoch:
             return
-        # ==========================================================
 
-        # 只有在需要评估时，代码才会继续执行到这里
-        if is_3d_eval_epoch:
-            num_output_for_this_epoch = self.args.num_output_3d
-        else: # 如果代码能到这里，is_2d_eval_epoch 必然为 True
-            num_output_for_this_epoch = self.args.num_output_2d
+        num_output_for_this_epoch = self.args.num_output_2d
 
-        # --- 2. 直接调用重构后的函数来生成分子 ---
         output_text, _ = self.sample_selfies_for_pocket(
-            pockets_emb=pockets_emb,       # <-- 传递原始的 pockets_emb
+            pockets_emb=pockets_emb,
             attention_mask=pock_attn_mask,
             num_beams=self.args.num_beams,
             do_sample=self.args.do_sample,
@@ -654,41 +619,71 @@ class LLMPL(L.LightningModule):
             batch_idx=batch_idx
         )
 
-        # --- 后续处理逻辑保持不变 ---
+        if self.trainer.is_global_zero and batch_idx == 0:
+            print("\n" + "="*80)
+            print(f"|          EPOCH {self.current_epoch}: GROUND TRUTH vs. GENERATED SAMPLES (BATCH 0)          |")
+            print("="*80)
+
+            num_outputs_per_prompt = len(output_text) // len(pocket_paths)
+
+            for i in range(min(10, len(ground_truth_mols))):
+                pocket_file = pocket_paths[i]
+                gt_mol = ground_truth_mols[i]
+
+                print(f"\n--- Sample {i+1} / Pocket: {pocket_file} ---")
+                try:
+                    gt_smiles = Chem.MolToSmiles(gt_mol, canonical=True)
+                    print(f"  [GROUND TRUTH]   SMILES: {gt_smiles}")
+                except Exception as e:
+                    print(f"  [GROUND TRUTH]   Error converting to SMILES: {e}")
+
+                start_idx = i * num_outputs_per_prompt
+                end_idx = start_idx + num_outputs_per_prompt
+                generated_selfies_for_pocket = output_text[start_idx:end_idx]
+
+                for j, gen_selfies in enumerate(generated_selfies_for_pocket):
+                    try:
+                        gen_smiles_decoded = sf.decoder(gen_selfies)
+                        gen_mol = Chem.MolFromSmiles(gen_smiles_decoded)
+                        if gen_mol:
+                            gen_smiles_canonical = Chem.MolToSmiles(gen_mol, canonical=True)
+                            print(f"  [GENERATED {j+1}]    SMILES: {gen_smiles_canonical}")
+                        else:
+                            print(f"  [GENERATED {j+1}]    INVALID SMILES: {gen_smiles_decoded}")
+                    except Exception as e:
+                        print(f"  [GENERATED {j+1}]    Error decoding SELFIES: {e}")
+            print("\n" + "="*80 + "\n")
+
+        self.sampled_seq.extend(output_text)
+
         num_outputs_per_prompt = len(output_text) // len(pocket_paths)
+
         expanded_gt_mols = [mol for mol in ground_truth_mols for _ in range(num_outputs_per_prompt)]
         expanded_pocket_paths = [path for path in pocket_paths for _ in range(num_outputs_per_prompt)]
 
-
-        self.sampled_seq.extend(output_text)
-        save_dir = "/data/share/liuzhiyuan/nai/NExT-Mol/sample/2D"
-        epoch_save_dir = os.path.join(save_dir, f"epoch_{self.current_epoch}")
         for i, (gen_selfies, gt_mol, pdb_path) in enumerate(zip(output_text, expanded_gt_mols, expanded_pocket_paths)):
             self.validation_outputs.append({
                 'generated': gen_selfies,
                 'ground_truth': gt_mol,
                 'pocket_path': pdb_path
             })
+            # if batch_idx == 0 and i < 2:
+            #     try:
+            #         os.makedirs(epoch_save_dir, exist_ok=True)
 
-            # --- MOVE THE SAVING LOGIC INSIDE THE LOOP HERE ---
-            # Now 'i' and 'gen_selfies' are correctly defined and available
-            if batch_idx == 0 and i < 2:
-                try:
-                    os.makedirs(epoch_save_dir, exist_ok=True)
+            #         smiles = sf.decoder(gen_selfies)
+            #         mol = Chem.MolFromSmiles(smiles)
+            #         if mol:
+            #             AllChem.Compute2DCoords(mol)
+            #             mol.SetProp("_Name", f"epoch_{self.current_epoch}_batch_{batch_idx}_sample_{i}")
+            #             save_path = os.path.join(epoch_save_dir, f"epoch_{self.current_epoch}_batch_{batch_idx}_sample_{i}.sdf")
 
-                    smiles = sf.decoder(gen_selfies)
-                    mol = Chem.MolFromSmiles(smiles)
-                    if mol:
-                        AllChem.Compute2DCoords(mol)
-                        mol.SetProp("_Name", f"epoch_{self.current_epoch}_batch_{batch_idx}_sample_{i}")
-                        save_path = os.path.join(epoch_save_dir, f"epoch_{self.current_epoch}_batch_{batch_idx}_sample_{i}.sdf")
+            #             with Chem.SDWriter(save_path) as writer:
+            #                 writer.write(mol)
 
-                        with Chem.SDWriter(save_path) as writer:
-                            writer.write(mol)
-
-                        print(f"\n--- [INFO] Saved sample molecule to: {save_path} ---")
-                except Exception as e:
-                    print(f"\n--- [WARNING] Failed to save sample molecule due to: {e} ---")
+            #             print(f"\n--- [INFO] Saved sample molecule to: {save_path} ---")
+            #     except Exception as e:
+            #         print(f"\n--- [WARNING] Failed to save sample molecule due to: {e} ---")
 
 
 
@@ -719,32 +714,6 @@ class LLMPL(L.LightningModule):
             print("---------------------------------------------------\n")
 
 
-
-                # ======================= [ 新增的调试代码块 ] =======================
-        print("\n--- [DEBUG] Raw Generation Analysis (First 5 Samples) ---")
-        for i, raw_selfies in enumerate(self.sampled_seq[:50]):
-            print(f"\n--- Sample {i} ---")
-            print(f"Raw Output String: '{raw_selfies}'")
-            try:
-                # 尝试解码
-                decoded_smiles = sf.decoder(raw_selfies)
-                print(f"Decoded SMILES: {decoded_smiles if decoded_smiles else 'DECODING_FAILED'}")
-
-                # 尝试拆分token并检查词汇表
-                split_tokens = sf.split_selfies(raw_selfies)
-                print(f"Split Tokens: {split_tokens}")
-
-                invalid_tokens = [tok for tok in split_tokens if tok not in self.tokenizer.vocab]
-                if invalid_tokens:
-                    print(f"!!! INVALID TOKENS FOUND: {invalid_tokens}")
-                else:
-                    print("All tokens are valid in tokenizer vocab.")
-
-            except Exception as e:
-                print(f"!!! ERROR during processing: {e}")
-        print("------------------------------------------------------\n")
-        # ======================= [ 调试代码块结束 ] =======================
-
         print(f"\n--- DEBUG: Entering on_validation_epoch_end for Epoch {self.current_epoch} ---")
 
         if not self.trainer.is_global_zero:
@@ -752,7 +721,6 @@ class LLMPL(L.LightningModule):
             return
         run_2d_eval = (self.current_epoch + 1) % self.args.eval_2d_every_n_epochs == 0
         if run_2d_eval:
-            # sampled_sequences = self.sample_molecules()
             print("--- DEBUG: Starting molecule generation via self.sampled_seq processing... ---")
 
             tuple_list = [reencode_selfies(item) for item in self.sampled_seq]
@@ -832,10 +800,50 @@ class LLMPL(L.LightningModule):
                 self.log(key, value, rank_zero_only=True)
             print("="*60 + "\n")
 
-        # print(f"--- DEBUG: Starting 3D conversion and docking for {len(self.validation_outputs)} generated sequences. ---")
 
-        # run_3d_eval = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
-        # if run_3d_eval:
+        run_3d_eval = (self.current_epoch + 1) % self.args.eval_3d_every_n_epochs == 0
+        print(f"--- DEBUG: Starting 3D conversion and docking for {len(self.validation_outputs)} generated sequences. ---")
+
+        if run_3d_eval:
+            print(f"\n--- [INFO] Preparing and saving tasks for offline 3D evaluation ---")
+
+            tasks = [
+                {
+                    'selfies': pair['generated'],
+                    'pocket_path': pair['pocket_path'],
+                    'ground_truth_smiles': Chem.MolToSmiles(pair['ground_truth']) # 保存GT SMILES用于后续比较
+                }
+                for pair in self.validation_outputs if pair.get('generated') and pair.get('pocket_path') and pair.get('ground_truth')
+            ]
+
+            if not tasks:
+                print("[WARNING] No valid generated molecules to save for 3D evaluation.")
+            else:
+                import pickle
+                import os
+
+                epoch = self.current_epoch
+                task_file_path = os.path.join(self.args.sampled_mol_dir, f"epoch_{epoch}_3d_tasks.pkl")
+
+                os.makedirs(os.path.dirname(task_file_path), exist_ok=True)
+
+                with open(task_file_path, 'wb') as f:
+                    pickle.dump(tasks, f)
+
+                print("\n" + "="*80)
+                print(f"|  SUCCESS: Saved {len(tasks)} molecule tasks to the following file:")
+                print(f"|  {task_file_path}")
+                print("|")
+                print(f"|  You can now run the offline CPU evaluation script on this file.")
+                print("="*80 + "\n")
+
+
+
+        print(f"--- DEBUG: GPU part of validation for Epoch {self.current_epoch} is completed ---")
+
+
+
+
         #     # --- 2. 准备3D分子并进行全面评估 (现在使用多进程并行) ---
         #     print(f"\n--- DEBUG: Starting PARALLEL 3D conversion for {len(self.validation_outputs)} generated sequences. ---")
 
@@ -853,14 +861,16 @@ class LLMPL(L.LightningModule):
         #     slurm_cpus_str = os.getenv('SLURM_CPUS_PER_TASK')
         #     if slurm_cpus_str:
         #         cpu_cores = int(slurm_cpus_str)
+
         #         print(f"--- INFO: Detected Slurm allocation. Using {cpu_cores} allocated cores for 3D generation. ---")
         #     else:
         #         # 如果不在Slurm环境中，回退到使用mp.cpu_count()
         #         cpu_cores = mp.cpu_count()
-        #         print(f"--- INFO: Not in a Slurm environment. Using total system cores: {cpu_cores} for 3D generation. ---")
+        #         #print(f"--- INFO: Not in a Slurm environment. Using total system cores: {cpu_cores} for 3D generation. ---")
 
         #     # 根据获取的核心数计算进程数，为操作系统和主进程留出余地
         #     num_processes = max(1, cpu_cores - 2)
+        #     #num_processes=29
         #     print(f"--- INFO: Using {num_processes} CPU cores for parallel processing. ---")
 
         #     with mp.Pool(processes=num_processes) as pool:
@@ -934,7 +944,9 @@ class LLMPL(L.LightningModule):
         #                     log_key = key.replace(' ', '_').replace('(%)', 'percent').replace('(', '').replace(')', '')
         #                     self.log(f'eval/{log_key}', value, sync_dist=True)
         #                     print(f"  - Logged eval/{log_key}: {value:.4f}")
+
         #             print("="*60 + "\n")
+        # print(f"--- DEBUG: Eval is completed ---")
 
 
     @torch.no_grad()
@@ -1020,25 +1032,23 @@ class LLMPL(L.LightningModule):
         pocket_emb_lm = self.projection(normalized_pockets_emb)
         pocket_emb_lm = self.post_projection_norm(pocket_emb_lm)
 
-        # --- 2. 准备 BOS token embedding ---
         bos_token_id = self.tokenizer.bos_token_id
         bos_token_tensor = torch.tensor([[bos_token_id]] * batch_size, device=device)
         bos_embedding = self.llm_model.get_input_embeddings()(bos_token_tensor)
 
-
-
         inputs_embeds = torch.cat([bos_embedding, pocket_emb_lm], dim=1)
+
+        if attention_mask is not None:
+            bos_attention_mask = torch.ones_like(bos_token_tensor)
+            attention_mask = torch.cat([bos_attention_mask, attention_mask], dim=1)
+
         # --- [ 新增调试代码 ] ---
         if batch_idx == 0: # 只在第一个batch打印，避免刷屏
             print(f"\n--- [DEBUG] Prompt Embedding Stats: Mean={pocket_emb_lm.mean():.4f}, Std={pocket_emb_lm.std():.4f}, IsNaN={torch.isnan(pocket_emb_lm).any()} ---")
         # --- [ 调试代码结束 ] ---
 
 
-        if attention_mask is not None:
-            bos_attention_mask = torch.ones_like(bos_token_tensor)
-            attention_mask = torch.cat([bos_attention_mask, attention_mask], dim=1)
 
-        # --- 4. 最终调用 generate 函数 ---
         outputs = self.llm_model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -1068,30 +1078,35 @@ class LLMPL(L.LightningModule):
         pocket_emb_lm = self.post_projection_norm(pocket_emb_lm)
         input_emb_selfies = self.llm_model.get_input_embeddings()(selfies_batch.input_ids)
 
-        input_emb = torch.cat([pocket_emb_lm, input_emb_selfies], dim=1)
+        batch_size = pockets_emb.shape[0]
+        device = pockets_emb.device
+        bos_token_tensor = torch.tensor([[self.tokenizer.bos_token_id]] * batch_size, device=device)
+        bos_embedding = self.llm_model.get_input_embeddings()(bos_token_tensor)
 
-
+        input_emb = torch.cat([bos_embedding, pocket_emb_lm, input_emb_selfies], dim=1)
 
         target_selfies = selfies_batch.input_ids.masked_fill(~selfies_batch.attention_mask.bool(), -100)
-        batch_size, seq_len = pocket_emb_lm.shape[:2]
-        empty_target = torch.full((batch_size, seq_len), -100, dtype=torch.long).to(pocket_emb_lm.device)
-        targets = torch.cat([empty_target, target_selfies], dim=1)
 
-        attention_mask = torch.cat([pock_attn_mask, selfies_batch.attention_mask], dim=1)
+        bos_len = bos_embedding.shape[1]
+        pocket_len = pocket_emb_lm.shape[1]
+        prefix_mask_len = bos_len + pocket_len
+        prefix_labels = torch.full((batch_size, prefix_mask_len), -100, dtype=torch.long).to(device)
+
+        targets = torch.cat([prefix_labels, target_selfies], dim=1)
+
+        bos_attn_mask = torch.ones_like(bos_token_tensor)
+        attention_mask = torch.cat([bos_attn_mask, pock_attn_mask, selfies_batch.attention_mask], dim=1)
 
         outputs = self.llm_model(inputs_embeds=input_emb,
-                attention_mask=attention_mask,
-                return_dict=True,
-                labels=targets,
-                output_hidden_states=True)
-
-        if torch.isnan(outputs.logits).any():
-            print("!!! WARNING: NaN found in model logits !!!")
-        if torch.isnan(outputs.loss):
-            print("!!! WARNING: Loss is NaN. Logits min/max:", outputs.logits.min(), outputs.max())
+                                attention_mask=attention_mask,
+                                return_dict=True,
+                                labels=targets)
 
         lm_loss = outputs.loss
         return lm_loss
+
+
+
     # def forward(self, selfies_batch, pockets_emb, pock_attn_mask):
     #     if torch.isnan(pockets_emb).any():
     #         print("!!! WARNING: NaN found in pockets_emb !!!")
@@ -1172,8 +1187,11 @@ class LLMPL(L.LightningModule):
         parser.add_argument('--scheduler', type=str, default='linear_warmup_cosine_lr', help='type of scheduler') # or
         parser.add_argument('--zero_embedding',action='store_true', default=False)
         parser.add_argument('--decay_projection_lr',action='store_true', default=False)
+        parser.add_argument('--old_ckpt',action='store_true', default=False)
         parser.add_argument('--optimizer', type=str, default='adamw', help='type of scheduler')
         parser.add_argument('--init_checkpoint', type=str, default=None)
+        parser.add_argument('--sampled_mol_dir', type=str, default=None)
+
         parser.add_argument('--skip_eval', action='store_true', default=False)
 
         parser.add_argument('--epoch_without_eval', type=int, default=3)
@@ -1181,107 +1199,76 @@ class LLMPL(L.LightningModule):
         return parent_parser
 
 
-    # @staticmethod
-    # def generate_3d_mol(smiles: str, quality: str = 'fast') -> Chem.Mol:
-    #     """
-    #     统一的、只保留最优路径的3D构象生成函数。
-    #     如果多构象生成失败，则直接返回 None。
-    #     """
-    #     try:
-    #         mol = Chem.MolFromSmiles(smiles)
-    #         if mol is None: return None
-    #         mol = Chem.AddHs(mol)
-
-    #         params = AllChem.ETKDGv3()
-    #         params.randomSeed = 0xf00d
-    #         params.numThreads = 1
-
-    #         if quality == 'high':
-    #             num_confs = 20
-    #             optimizer = AllChem.MMFFOptimizeMoleculeConfs
-    #         else: # fast 模式
-    #             num_confs = 5
-    #             optimizer = AllChem.UFFOptimizeMoleculeConfs
-
-    #         # 尝试生成多个构象
-    #         cids = AllChem.EmbedMultipleConfs(mol, numConfs=num_confs, params=params)
-    #         if not cids:
-    #             # 如果未能生成任何构象，则认为失败
-    #             return None
-
-    #         # 优化所有构象
-    #         res = optimizer(mol, numThreads=1)
-    #         # res 可能是 [(conf_id, energy), ...] 的列表或表示失败的整数
-    #         if not isinstance(res, list) or not res:
-    #             return None # 优化失败
-
-    #         # 选取能量最低的构象
-    #         min_energy_idx = np.argmin([e[1] for e in res])
-
-    #         # 创建一个只包含最优构象的新分子对象并返回
-    #         best_mol = Chem.Mol(mol)
-    #         best_mol.RemoveAllConformers()
-    #         best_conformer = mol.GetConformer(int(min_energy_idx))
-    #         best_mol.AddConformer(best_conformer, assignId=True)
-    #         return best_mol
-
-    #     except Exception:
-    #         # 任何其他意外错误都直接返回 None
-    #         return None
-
     @staticmethod
     def generate_3d_mol(smiles: str, quality: str = 'fast') -> Chem.Mol:
         """
-        一个更稳健且可调速的3D构象生成函数。
-        quality: 'fast' 或 'high'
+        一个更稳健、统一且可调速的3D构象生成函数。
+
+        该函数统一使用MMFF94力场进行构象生成和优化，它比UFF更适合处理类药有机分子。
+        通过调整 'quality' 参数可以控制构象搜索的广度（即速度与质量的权衡）。
+        整个过程被严密地包裹在try-except块中，以处理任何可能的错误，并在失败时返回None。
+
+        Args:
+            smiles (str): 输入的SMILES分子式.
+            quality (str): 'fast' 或 'high'。
+                          'fast': 生成较少构象，速度快。
+                          'high': 生成更多构象，搜索更充分，速度慢。
+
+        Returns:
+            Chem.Mol: 一个带有单一最优3D构象的RDKit分子对象，如果失败则返回 None.
         """
         try:
+            # 1. 从SMILES创建分子对象并加氢
             mol = Chem.MolFromSmiles(smiles)
-            if mol is None: return None
-            mol = Chem.AddHs(mol)
-        except Exception:
-            return None
+            if mol is None:
+                return None
+            mol = Chem.AddHs(mol, addCoords=True)
 
-        params = AllChem.ETKDGv3()
-        params.randomSeed = 0xf00d
-        params.numThreads = 1 # **关键优化点，见方案二**
+            # 2. 检查分子是否与MMFF94力场兼容
+            # 如果分子包含MMFF94不支持的原子类型，此函数会抛出异常
+            AllChem.MMFFGetMoleculeProperties(mol)
 
-        if quality == 'high':
-            # 高质量模式：采样更多构象，使用MMFF力场
-            num_confs = 20
-            optimizer = AllChem.MMFFOptimizeMoleculeConfs
-        else: # fast模式
-            # 快速模式：采样更少构象，使用速度飞快的UFF力场
-            num_confs = 5
-            optimizer = AllChem.UFFOptimizeMoleculeConfs
+            # 3. 根据质量要求设置参数
+            if quality == 'high':
+                num_confs = 50  # 高质量模式下，进行更广泛的构象搜索
+            else:  # 'fast' 模式
+                num_confs = 5  # 快速模式下，进行有限的构象搜索
 
-        try:
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 0xf00d
+            params.numThreads = 1  # 在多进程环境中，必须设置为1以保证线程安全
+
+            # 4. 生成多个初始3D构象
             cids = AllChem.EmbedMultipleConfs(mol, numConfs=num_confs, params=params)
-            if not cids: raise ValueError("Conformer embedding failed.")
+            if len(cids) == 0:
+                # 如果RDKit未能生成任何有效构象
+                return None
 
-            res = optimizer(mol, numThreads=1) # **关键优化点，见方案二**
-            if not res: raise ValueError("Optimization failed.")
+            # 5. 使用MMFF94力场优化所有构象，并找到能量最低的那个
+            # res 是一个元组列表，每个元组是 (是否收敛, 能量)
+            res = AllChem.MMFFOptimizeMoleculeConfs(mol, numThreads=1)
 
-            min_energy_idx = np.argmin([e[1] for e in res])
+            # 筛选出成功收敛的构象
+            converged_res = [(i, e) for i, (flag, e) in enumerate(res) if flag == 0]
+            if not converged_res:
+                # 如果没有一个构象成功收敛
+                return None
 
+            # 从成功收敛的构象中，找到能量最低的那个
+            min_energy_idx, _ = min(converged_res, key=lambda x: x[1])
+
+            # 6. 创建一个只包含最优构象的新分子对象并返回
             best_mol = Chem.Mol(mol)
             best_mol.RemoveAllConformers()
             best_conformer = mol.GetConformer(int(min_energy_idx))
             best_mol.AddConformer(best_conformer, assignId=True)
-            return best_mol
-        except Exception:
-            try:
-                mol_fallback = Chem.Mol(mol)
-                if AllChem.EmbedMolecule(mol_fallback, params) == -1:
-                    return None
 
-                if quality == 'fast':
-                    AllChem.UFFOptimizeMolecule(mol_fallback)
-                else:
-                    AllChem.MMFFOptimizeMolecule(mol_fallback)
-                return mol_fallback
-            except Exception:
-                return None
+            return best_mol
+
+        except Exception:
+            # 捕获所有可能的异常 (如SMILES解析失败, MMFF不兼容, 构象生成失败等)
+            # 并以安全的方式返回None，防止整个程序崩溃。
+            return None
     @torch.no_grad()
     def debug_inspect_logits(self, logits, prompt_length, batch_idx, epoch, step):
         """
